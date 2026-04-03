@@ -7,6 +7,8 @@ __pycache__/
 backend/static/
 frontend/dist/
 frontend/node_modules/
+frontend/*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
 coverage/
 .DS_Store
-

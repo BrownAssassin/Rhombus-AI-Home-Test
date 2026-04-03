@@ -1,10 +1,11 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App";
 
 
 afterEach(() => {
+  cleanup();
   vi.restoreAllMocks();
 });
 
@@ -30,7 +31,9 @@ describe("App", () => {
     fireEvent.change(screen.getByLabelText(/^Bucket$/i), { target: { value: "demo-bucket" } });
     fireEvent.click(screen.getByRole("button", { name: /Browse files/i }));
 
-    await waitFor(() => expect(screen.getByText("folder/sample.csv")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /folder\/sample\.csv/i })).toBeInTheDocument(),
+    );
   });
 
   it("renders schema results after processing", async () => {
@@ -80,13 +83,14 @@ describe("App", () => {
     fireEvent.change(screen.getByLabelText(/^Bucket$/i), { target: { value: "demo-bucket" } });
     fireEvent.click(screen.getByRole("button", { name: /Browse files/i }));
 
-    await waitFor(() => expect(screen.getByText("sample.csv")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /sample\.csv/i })).toBeInTheDocument(),
+    );
 
     fireEvent.click(screen.getByRole("button", { name: /Process selection/i }));
 
     await waitFor(() => expect(screen.getByText("Inferred schema")).toBeInTheDocument());
-    expect(screen.getByText("Score")).toBeInTheDocument();
+    expect(screen.getByRole("cell", { name: "Score" })).toBeInTheDocument();
     expect(screen.getByDisplayValue("Float")).toBeInTheDocument();
   });
 });
-

@@ -1,4 +1,4 @@
-import { startTransition, useState } from "react";
+import { startTransition, useState, type JSX } from "react";
 
 import { fetchS3Files, processFile } from "./api";
 import type { ColumnInferenceResult, ProcessResponse, S3CredentialsInput, S3File } from "./types";
@@ -66,25 +66,44 @@ export default function App() {
   const [error, setError] = useState("");
 
   const selectedFile = files.find((item) => item.key === selectedKey) ?? null;
+  const missingConnectionFields = [
+    !credentials.access_key_id && "access key ID",
+    !credentials.secret_access_key && "secret access key",
+    !credentials.region && "region",
+    !credentials.bucket && "bucket",
+  ].filter(Boolean) as string[];
+  const hasConnectionDetails = missingConnectionFields.length === 0;
+  const changedOverrideCount = result
+    ? result.schema.filter((column) => (overrides[column.column] ?? column.inferred_type) !== column.inferred_type).length
+    : 0;
 
   function updateCredentialField(field: keyof S3CredentialsInput, value: string) {
     startTransition(() => {
       setCredentials((current) => ({ ...current, [field]: value }));
     });
+    if (error) {
+      setError("");
+    }
   }
 
   async function handleBrowseFiles() {
+    if (!hasConnectionDetails) {
+      setError(`Enter ${missingConnectionFields.join(", ")} before browsing S3 files.`);
+      return;
+    }
+
     setBusyState("listing");
     setError("");
     setResult(null);
     try {
       const nextFiles = await fetchS3Files(credentials);
       setFiles(nextFiles);
-      if (nextFiles.length > 0 && !selectedKey) {
-        setSelectedKey(nextFiles[0].key);
+      const currentSelectionStillExists = nextFiles.some((file) => file.key === selectedKey);
+      if (!currentSelectionStillExists) {
+        setSelectedKey(nextFiles[0]?.key ?? "");
       }
       if (nextFiles.length === 0) {
-        setSelectedKey("");
+        setSheetName("");
       }
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "Unable to load files.");
@@ -94,6 +113,10 @@ export default function App() {
   }
 
   async function handleProcessFile() {
+    if (!hasConnectionDetails) {
+      setError(`Enter ${missingConnectionFields.join(", ")} before processing a file.`);
+      return;
+    }
     if (!selectedKey) {
       setError("Choose a file before processing.");
       return;
@@ -125,6 +148,16 @@ export default function App() {
     setOverrides(Object.fromEntries(schema.map((column) => [column.column, column.inferred_type])));
   }
 
+  function handleSelectFile(file: S3File) {
+    setSelectedKey(file.key);
+    if (file.format !== "excel") {
+      setSheetName("");
+    }
+    if (error) {
+      setError("");
+    }
+  }
+
   return (
     <main className="page-shell">
       <section className="hero-panel">
@@ -143,7 +176,11 @@ export default function App() {
               <p className="section-label">Step 1</p>
               <h2>S3 connection</h2>
             </div>
-            <button className="primary-button" onClick={handleBrowseFiles} disabled={busyState !== "idle"}>
+            <button
+              className="primary-button"
+              onClick={handleBrowseFiles}
+              disabled={busyState !== "idle" || !hasConnectionDetails}
+            >
               {busyState === "listing" ? "Loading files..." : "Browse files"}
             </button>
           </div>
@@ -201,6 +238,9 @@ export default function App() {
           <p className="helper-text">
             Credentials stay in component state only. They are never saved to local storage by this app.
           </p>
+          {!hasConnectionDetails ? (
+            <p className="helper-text">Required before browsing: {missingConnectionFields.join(", ")}.</p>
+          ) : null}
         </article>
 
         <article className="card">
@@ -220,12 +260,22 @@ export default function App() {
             </div>
           ) : (
             <>
+              <div className="metrics-row">
+                <div className="metric">
+                  <span className="metric-label">Supported objects</span>
+                  <strong>{files.length}</strong>
+                </div>
+                <div className="metric">
+                  <span className="metric-label">Selected file</span>
+                  <strong>{selectedFile?.key ?? "None"}</strong>
+                </div>
+              </div>
               <div className="file-list">
                 {files.map((file) => (
                   <button
                     key={file.key}
                     className={`file-item ${file.key === selectedKey ? "selected" : ""}`}
-                    onClick={() => setSelectedKey(file.key)}
+                    onClick={() => handleSelectFile(file)}
                   >
                     <span>{file.key}</span>
                     <span>{file.format.toUpperCase()} · {formatBytes(file.size)}</span>
@@ -274,6 +324,10 @@ export default function App() {
                 <div className="metric">
                   <span className="metric-label">Run ID</span>
                   <strong>{result.runId}</strong>
+                </div>
+                <div className="metric">
+                  <span className="metric-label">Changed overrides</span>
+                  <strong>{changedOverrideCount}</strong>
                 </div>
               </div>
               <div className="table-wrap">
@@ -368,4 +422,3 @@ export default function App() {
     </main>
   );
 }
-
