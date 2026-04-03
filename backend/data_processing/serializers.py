@@ -1,0 +1,44 @@
+from rest_framework import serializers
+
+from .services.inference import ALLOWED_OVERRIDE_TYPES
+
+
+class S3CredentialsSerializer(serializers.Serializer):
+    access_key_id = serializers.CharField(max_length=256, trim_whitespace=True)
+    secret_access_key = serializers.CharField(max_length=256, trim_whitespace=True)
+    session_token = serializers.CharField(
+        max_length=4096,
+        trim_whitespace=True,
+        required=False,
+        allow_blank=True,
+    )
+    region = serializers.CharField(max_length=64, trim_whitespace=True)
+    bucket = serializers.CharField(max_length=255, trim_whitespace=True)
+    prefix = serializers.CharField(
+        max_length=1024,
+        trim_whitespace=True,
+        required=False,
+        allow_blank=True,
+    )
+
+
+class ListFilesRequestSerializer(S3CredentialsSerializer):
+    pass
+
+
+class ColumnOverrideSerializer(serializers.Serializer):
+    column = serializers.CharField(max_length=255, trim_whitespace=True)
+    target_type = serializers.ChoiceField(choices=ALLOWED_OVERRIDE_TYPES)
+
+
+class ProcessFileRequestSerializer(S3CredentialsSerializer):
+    object_key = serializers.CharField(max_length=1024, trim_whitespace=True)
+    sheet_name = serializers.CharField(
+        max_length=255,
+        trim_whitespace=True,
+        required=False,
+        allow_blank=True,
+    )
+    preview_row_limit = serializers.IntegerField(required=False, min_value=1, max_value=500, default=100)
+    overrides = ColumnOverrideSerializer(many=True, required=False)
+

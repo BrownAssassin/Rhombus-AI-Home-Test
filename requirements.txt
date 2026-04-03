@@ -1,0 +1,8 @@
+Django==5.2.12
+djangorestframework==3.16.1
+boto3==1.40.59
+pandas==2.3.3
+openpyxl==3.1.5
+gunicorn==23.0.0
+whitenoise==6.11.0
+
