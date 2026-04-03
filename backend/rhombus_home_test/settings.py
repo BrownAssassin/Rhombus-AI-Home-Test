@@ -68,7 +68,7 @@ USE_TZ = True
 
 STATIC_URL = "/static/"
 STATIC_ROOT = REPO_ROOT / "backend" / "static"
-STATICFILES_DIRS = [FRONTEND_BUILD_DIR / "assets"]
+STATICFILES_DIRS = [FRONTEND_BUILD_DIR / "assets"] if (FRONTEND_BUILD_DIR / "assets").exists() else []
 STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
@@ -76,4 +76,3 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 REST_FRAMEWORK = {
     "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
 }
-

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 import tempfile
@@ -112,6 +113,47 @@ def list_supported_files(credentials: S3Credentials) -> list[dict[str, Any]]:
     return sorted(files, key=lambda item: item["key"].lower())
 
 
+def resolve_supported_file_type(file_name: str) -> str:
+    extension = Path(file_name).suffix.lower()
+    if extension not in SUPPORTED_EXTENSIONS:
+        raise UnsupportedFileTypeError("Only CSV, XLS, and XLSX files are supported.")
+    return SUPPORTED_EXTENSIONS[extension]
+
+
+def build_schema_from_profiles(profiles, overrides: dict[str, str]) -> tuple[list[dict[str, Any]], list[str]]:
+    schema = infer_profiles(profiles)
+    schema = validate_overrides(profiles, schema, overrides)
+    warnings = sorted({warning for item in schema for warning in item["warnings"]})
+    return schema, warnings
+
+
+def process_dataframe(
+    df: pd.DataFrame,
+    *,
+    overrides: dict[str, str] | None = None,
+    preview_row_limit: int = 100,
+    file_type: str = "csv",
+    object_key: str = "",
+    selected_sheet: str = "",
+) -> dict[str, Any]:
+    profiles = create_profiles(df.columns)
+    update_profiles_from_dataframe(profiles, df)
+    schema, warnings = build_schema_from_profiles(profiles, overrides or {})
+    converted = convert_dataframe(df, schema)
+    preview_columns, preview_rows = dataframe_preview(converted, preview_row_limit)
+
+    return {
+        "objectKey": object_key,
+        "fileType": file_type,
+        "selectedSheet": selected_sheet,
+        "rowCount": len(df),
+        "schema": schema,
+        "previewColumns": preview_columns,
+        "previewRows": preview_rows,
+        "warnings": warnings,
+    }
+
+
 def _download_object_to_temp_file(client, bucket: str, object_key: str) -> tuple[tempfile.NamedTemporaryFile, int]:
     try:
         head = client.head_object(Bucket=bucket, Key=object_key)
@@ -156,6 +198,47 @@ def _read_csv_chunks(client, bucket: str, object_key: str):
         raise ProcessingServiceError("The selected CSV file could not be parsed.") from exc
 
 
+def _read_local_csv_chunks(file_path: Path) -> Iterator[pd.DataFrame]:
+    try:
+        yield from pd.read_csv(
+            file_path,
+            dtype=str,
+            keep_default_na=False,
+            na_filter=False,
+            chunksize=CSV_CHUNK_SIZE,
+        )
+    except pd.errors.ParserError as exc:
+        raise ProcessingServiceError("The selected CSV file could not be parsed.") from exc
+
+
+def _fetch_local_csv_columns(file_path: Path) -> list[str]:
+    try:
+        return list(pd.read_csv(file_path, dtype=str, keep_default_na=False, na_filter=False, nrows=0).columns)
+    except pd.errors.ParserError as exc:
+        raise ProcessingServiceError("The selected CSV file could not be parsed.") from exc
+
+
+def _load_local_excel_dataframe(file_path: Path, sheet_name: str) -> tuple[pd.DataFrame, str]:
+    if file_path.stat().st_size > MAX_EXCEL_SIZE_BYTES:
+        raise FileTooLargeError(
+            f"Excel files larger than {MAX_EXCEL_SIZE_BYTES // (1024 * 1024)} MB are rejected in this MVP."
+        )
+
+    target_sheet = sheet_name or 0
+    try:
+        df = pd.read_excel(
+            file_path,
+            sheet_name=target_sheet,
+            dtype=str,
+            keep_default_na=False,
+        )
+    except ValueError as exc:
+        raise S3AccessError("The requested Excel sheet could not be found.") from exc
+
+    selected_sheet = sheet_name if isinstance(target_sheet, str) else ""
+    return df, selected_sheet
+
+
 def process_s3_object(
     credentials: S3Credentials,
     object_key: str,
@@ -163,14 +246,12 @@ def process_s3_object(
     overrides: dict[str, str] | None = None,
     preview_row_limit: int = 100,
 ) -> dict[str, Any]:
-    extension = Path(object_key).suffix.lower()
-    if extension not in SUPPORTED_EXTENSIONS:
-        raise UnsupportedFileTypeError("Only CSV, XLS, and XLSX files are supported.")
+    file_type = resolve_supported_file_type(object_key)
 
     client = build_s3_client(credentials)
     started = perf_counter()
 
-    if extension == ".csv":
+    if file_type == "csv":
         result = _process_csv(client, credentials.bucket, object_key, overrides or {}, preview_row_limit)
     else:
         result = _process_excel(client, credentials.bucket, object_key, sheet_name, overrides or {}, preview_row_limit)
@@ -184,6 +265,42 @@ def process_s3_object(
     return result
 
 
+def process_local_file(
+    file_path: str | Path,
+    *,
+    sheet_name: str = "",
+    overrides: dict[str, str] | None = None,
+    preview_row_limit: int = 100,
+) -> dict[str, Any]:
+    path = Path(file_path)
+    if not path.exists():
+        raise ProcessingServiceError(f"Local file '{path}' does not exist.")
+
+    file_type = resolve_supported_file_type(path.name)
+    started = perf_counter()
+
+    if file_type == "csv":
+        result = _process_local_csv(path, overrides or {}, preview_row_limit)
+    else:
+        df, selected_sheet = _load_local_excel_dataframe(path, sheet_name)
+        result = process_dataframe(
+            df,
+            overrides=overrides,
+            preview_row_limit=preview_row_limit,
+            file_type=file_type,
+            object_key=str(path),
+            selected_sheet=selected_sheet,
+        )
+
+    duration_ms = round((perf_counter() - started) * 1000, 2)
+    result["processingMetadata"] = {
+        "durationMs": duration_ms,
+        "previewRowLimit": preview_row_limit,
+        "chunkSize": CSV_CHUNK_SIZE if file_type == "csv" else None,
+    }
+    return result
+
+
 def _process_csv(client, bucket: str, object_key: str, overrides: dict[str, str], preview_row_limit: int) -> dict[str, Any]:
     columns = _fetch_csv_columns(client, bucket, object_key)
     profiles = create_profiles(columns)
@@ -193,8 +310,7 @@ def _process_csv(client, bucket: str, object_key: str, overrides: dict[str, str]
         row_count += len(chunk)
         update_profiles_from_dataframe(profiles, chunk)
 
-    schema = infer_profiles(profiles)
-    schema = validate_overrides(profiles, schema, overrides)
+    schema, warnings = build_schema_from_profiles(profiles, overrides)
 
     preview_rows: list[dict[str, Any]] = []
     preview_columns: list[str] = columns
@@ -206,7 +322,6 @@ def _process_csv(client, bucket: str, object_key: str, overrides: dict[str, str]
             if len(preview_rows) >= preview_row_limit:
                 break
 
-    warnings = sorted({warning for item in schema for warning in item["warnings"]})
     return {
         "bucket": bucket,
         "objectKey": object_key,
@@ -233,36 +348,55 @@ def _process_excel(
     temp_file.close()
 
     try:
-        target_sheet = sheet_name or 0
-        df = pd.read_excel(
+        df, selected_sheet = _load_local_excel_dataframe(
             temp_path,
-            sheet_name=target_sheet,
-            dtype=str,
-            keep_default_na=False,
+            sheet_name,
         )
-    except ValueError as exc:
-        raise S3AccessError("The requested Excel sheet could not be found.") from exc
     finally:
         temp_path.unlink(missing_ok=True)
 
-    profiles = create_profiles(df.columns)
-    update_profiles_from_dataframe(profiles, df)
-    schema = infer_profiles(profiles)
-    schema = validate_overrides(profiles, schema, overrides)
-    converted = convert_dataframe(df, schema)
-    preview_columns, preview_rows = dataframe_preview(converted, preview_row_limit)
-    warnings = sorted({warning for item in schema for warning in item["warnings"]})
-
-    selected_sheet = sheet_name if isinstance(target_sheet, str) else ""
+    result = process_dataframe(
+        df,
+        overrides=overrides,
+        preview_row_limit=preview_row_limit,
+        file_type="excel",
+        object_key=object_key,
+        selected_sheet=selected_sheet,
+    )
     return {
         "bucket": bucket,
-        "objectKey": object_key,
-        "fileType": "excel",
-        "selectedSheet": selected_sheet,
-        "rowCount": len(df),
-        "schema": schema,
-        "previewColumns": preview_columns,
-        "previewRows": preview_rows,
-        "warnings": warnings,
+        **result,
     }
 
+
+def _process_local_csv(file_path: Path, overrides: dict[str, str], preview_row_limit: int) -> dict[str, Any]:
+    columns = _fetch_local_csv_columns(file_path)
+    profiles = create_profiles(columns)
+    row_count = 0
+
+    for chunk in _read_local_csv_chunks(file_path):
+        row_count += len(chunk)
+        update_profiles_from_dataframe(profiles, chunk)
+
+    schema, warnings = build_schema_from_profiles(profiles, overrides)
+
+    preview_rows: list[dict[str, Any]] = []
+    preview_columns: list[str] = columns
+    if row_count > 0:
+        for chunk in _read_local_csv_chunks(file_path):
+            converted = convert_dataframe(chunk, schema)
+            preview_columns, chunk_rows = dataframe_preview(converted, max(preview_row_limit - len(preview_rows), 0))
+            preview_rows.extend(chunk_rows)
+            if len(preview_rows) >= preview_row_limit:
+                break
+
+    return {
+        "objectKey": str(file_path),
+        "fileType": "csv",
+        "selectedSheet": "",
+        "rowCount": row_count,
+        "schema": schema,
+        "previewColumns": preview_columns,
+        "previewRows": preview_rows[:preview_row_limit],
+        "warnings": warnings,
+    }
