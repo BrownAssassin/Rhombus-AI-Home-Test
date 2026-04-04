@@ -260,7 +260,7 @@ def process_s3_object(
     result["processingMetadata"] = {
         "durationMs": duration_ms,
         "previewRowLimit": preview_row_limit,
-        "chunkSize": CSV_CHUNK_SIZE if extension == ".csv" else None,
+        "chunkSize": CSV_CHUNK_SIZE if file_type == "csv" else None,
     }
     return result
 

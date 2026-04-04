@@ -1,0 +1,32 @@
+from django.test import SimpleTestCase
+import pandas as pd
+
+from data_processing.services.inference import infer_dataframe, infer_profiles, profile_dataframe, validate_overrides
+
+
+class InferenceServiceTests(SimpleTestCase):
+    def test_infer_dataframe_detects_boolean_category_and_ambiguous_dates(self) -> None:
+        df = pd.DataFrame(
+            {
+                "is_active": ["yes", "no"] * 10,
+                "event_date": ["01/02/2020", "02/03/2020"] * 10,
+                "segment": ["enterprise"] * 12 + ["self-serve"] * 8,
+            }
+        )
+
+        schema = {item["column"]: item for item in infer_dataframe(df)}
+
+        self.assertEqual(schema["is_active"]["inferred_type"], "boolean")
+        self.assertEqual(schema["segment"]["inferred_type"], "category")
+        self.assertEqual(schema["event_date"]["inferred_type"], "text")
+        self.assertIn("ambiguous", schema["event_date"]["warnings"][0].lower())
+
+    def test_validate_overrides_rejects_unsafe_integer_conversion(self) -> None:
+        df = pd.DataFrame({"mixed": ["1", "two", "3"]})
+
+        profiles = profile_dataframe(df)
+        schema = infer_profiles(profiles)
+
+        with self.assertRaisesMessage(ValueError, "cannot be safely converted to 'integer'"):
+            validate_overrides(profiles, schema, {"mixed": "integer"})
+

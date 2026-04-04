@@ -4,10 +4,10 @@ import argparse
 from pathlib import Path
 import sys
 
-from data_processing.services.processing import ProcessingServiceError, process_local_file
-
 REPO_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO_ROOT / "backend"))
+
+from data_processing.services.processing import ProcessingServiceError, process_local_file
 
 
 def build_parser() -> argparse.ArgumentParser:

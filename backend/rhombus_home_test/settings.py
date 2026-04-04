@@ -1,14 +1,30 @@
+import os
 from pathlib import Path
+
+
+def env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().casefold() in {"1", "true", "yes", "on"}
+
+
+def env_list(name: str, default: list[str]) -> list[str]:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return [item.strip() for item in value.split(",") if item.strip()]
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 REPO_ROOT = BASE_DIR.parent
 FRONTEND_DIR = REPO_ROOT / "frontend"
-FRONTEND_BUILD_DIR = FRONTEND_DIR / "dist"
+FRONTEND_BUILD_DIR = Path(os.getenv("DJANGO_FRONTEND_BUILD_DIR", FRONTEND_DIR / "dist"))
 
-SECRET_KEY = "django-insecure-rhombus-home-test"
-DEBUG = True
-ALLOWED_HOSTS = ["*"]
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "django-insecure-rhombus-home-test")
+DEBUG = env_bool("DJANGO_DEBUG", True)
+ALLOWED_HOSTS = env_list("DJANGO_ALLOWED_HOSTS", ["*"])
+CSRF_TRUSTED_ORIGINS = env_list("DJANGO_CSRF_TRUSTED_ORIGINS", [])
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -55,7 +71,7 @@ ASGI_APPLICATION = "rhombus_home_test.asgi.application"
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
-        "NAME": REPO_ROOT / "db.sqlite3",
+        "NAME": Path(os.getenv("DJANGO_SQLITE_PATH", REPO_ROOT / "db.sqlite3")),
     }
 }
 
@@ -70,6 +86,7 @@ STATIC_URL = "/static/"
 STATIC_ROOT = REPO_ROOT / "backend" / "static"
 STATICFILES_DIRS = [FRONTEND_BUILD_DIR / "assets"] if (FRONTEND_BUILD_DIR / "assets").exists() else []
 STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
