@@ -131,6 +131,8 @@ def parse_datetime_candidate(value: str) -> tuple[bool, bool, bool]:
         first = int(match.group(1))
         second = int(match.group(2))
         if first <= 12 and second <= 12:
+            # Keep locale-sensitive short dates as text unless one ordering wins
+            # decisively, otherwise pandas can silently reinterpret the data.
             month_first = pd.to_datetime(series, errors="coerce", dayfirst=False)
             day_first = pd.to_datetime(series, errors="coerce", dayfirst=True)
             if not month_first.isna().all() and not day_first.isna().all():
@@ -228,6 +230,8 @@ def build_column_inference(profile: ColumnProfile) -> ColumnInference:
         storage_type = "object"
     else:
         unique_ratio = profile.unique_count / profile.non_null_count if profile.non_null_count else 1
+        # Small samples often look categorical by accident, so only promote
+        # strings when cardinality stays low across a reasonably sized column.
         if profile.non_null_count >= 20 and profile.unique_count <= 50 and unique_ratio <= 0.2:
             inferred_type = "category"
             confidence = 0.76
@@ -288,6 +292,8 @@ def validate_overrides(
             raise ValueError(f"Column '{column}' does not exist in the dataset.")
         if target_type not in ALLOWED_OVERRIDE_TYPES:
             raise ValueError(f"Unsupported override type '{target_type}'.")
+        # Overrides are intentionally conservative so a manual selection cannot
+        # hide mixed data quality issues behind a lossy coercion.
         if not can_profile_convert_to(profiles[column], target_type):
             raise ValueError(f"Column '{column}' cannot be safely converted to '{target_type}'.")
 
@@ -382,4 +388,3 @@ def dataframe_preview(df: pd.DataFrame, limit: int) -> tuple[list[str], list[dic
     for _, row in preview_df.iterrows():
         rows.append({column: serialize_scalar(value) for column, value in row.items()})
     return list(preview_df.columns), rows
-

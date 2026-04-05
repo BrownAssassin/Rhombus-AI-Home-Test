@@ -3,7 +3,6 @@ import { startTransition, useState, type JSX } from "react";
 import { fetchS3Files, processFile } from "./api";
 import type { ColumnInferenceResult, ProcessResponse, S3CredentialsInput, S3File } from "./types";
 
-
 const defaultCredentials: S3CredentialsInput = {
   access_key_id: "",
   secret_access_key: "",
@@ -24,7 +23,6 @@ const typeLabelOverrides: Record<string, string> = {
   complex: "Complex",
 };
 
-
 function formatBytes(value: number): string {
   if (value < 1024) {
     return `${value} B`;
@@ -34,7 +32,6 @@ function formatBytes(value: number): string {
   }
   return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
-
 
 function formatColumnWarnings(schema: ColumnInferenceResult[]): JSX.Element | null {
   const warningEntries = schema.flatMap((item) => item.warnings.map((warning) => `${item.column}: ${warning}`));
@@ -53,7 +50,6 @@ function formatColumnWarnings(schema: ColumnInferenceResult[]): JSX.Element | nu
     </div>
   );
 }
-
 
 export default function App() {
   const [credentials, setCredentials] = useState<S3CredentialsInput>(defaultCredentials);
@@ -74,7 +70,8 @@ export default function App() {
   ].filter(Boolean) as string[];
   const hasConnectionDetails = missingConnectionFields.length === 0;
   const changedOverrideCount = result
-    ? result.schema.filter((column) => (overrides[column.column] ?? column.inferred_type) !== column.inferred_type).length
+    ? result.schema.filter((column) => (overrides[column.column] ?? column.inferred_type) !== column.inferred_type)
+        .length
     : 0;
 
   function updateCredentialField(field: keyof S3CredentialsInput, value: string) {
@@ -134,9 +131,7 @@ export default function App() {
         overrides: Object.entries(overrides).map(([column, target_type]) => ({ column, target_type })),
       });
       setResult(nextResult);
-      setOverrides(
-        Object.fromEntries(nextResult.schema.map((column) => [column.column, column.inferred_type])),
-      );
+      setOverrides(Object.fromEntries(nextResult.schema.map((column) => [column.column, column.inferred_type])));
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "Unable to process file.");
     } finally {
@@ -164,8 +159,8 @@ export default function App() {
         <p className="eyebrow">Rhombus AI Home Test</p>
         <h1>S3 data type inference workbench</h1>
         <p className="hero-copy">
-          Connect to S3, select a CSV or Excel file, profile the schema with stricter inference rules, and
-          manually override any column before previewing the processed data.
+          Connect to S3, select a CSV or Excel file, profile the schema with stricter inference rules, and manually
+          override any column before previewing the processed data.
         </p>
       </section>
 
@@ -235,9 +230,7 @@ export default function App() {
               />
             </label>
           </div>
-          <p className="helper-text">
-            Credentials stay in component state only. They are never saved to local storage by this app.
-          </p>
+          <p className="helper-text">Credentials stay in component state only. They are never saved to local storage by this app.</p>
           {!hasConnectionDetails ? (
             <p className="helper-text">Required before browsing: {missingConnectionFields.join(", ")}.</p>
           ) : null}
@@ -249,7 +242,11 @@ export default function App() {
               <p className="section-label">Step 2</p>
               <h2>Supported files</h2>
             </div>
-            <button className="secondary-button" onClick={handleProcessFile} disabled={!selectedKey || busyState !== "idle"}>
+            <button
+              className="secondary-button"
+              onClick={handleProcessFile}
+              disabled={!selectedKey || busyState !== "idle"}
+            >
               {busyState === "processing" ? "Processing..." : "Process selection"}
             </button>
           </div>
@@ -278,14 +275,18 @@ export default function App() {
                     onClick={() => handleSelectFile(file)}
                   >
                     <span>{file.key}</span>
-                    <span>{file.format.toUpperCase()} · {formatBytes(file.size)}</span>
+                    <span>{file.format.toUpperCase()} - {formatBytes(file.size)}</span>
                   </button>
                 ))}
               </div>
               {selectedFile?.format === "excel" ? (
                 <label>
                   Optional sheet name
-                  <input value={sheetName} onChange={(event) => setSheetName(event.target.value)} placeholder="First sheet if blank" />
+                  <input
+                    value={sheetName}
+                    onChange={(event) => setSheetName(event.target.value)}
+                    placeholder="First sheet if blank"
+                  />
                 </label>
               ) : null}
             </>
@@ -296,128 +297,126 @@ export default function App() {
       {error ? <div className="callout danger">{error}</div> : null}
 
       {result ? (
-        <>
-          <section className="results-grid">
-            <article className="card">
-              <div className="card-header compact">
-                <div>
-                  <p className="section-label">Step 3</p>
-                  <h2>Inferred schema</h2>
-                </div>
-                <button
-                  className="secondary-button"
-                  onClick={() => applySchemaDefaults(result.schema)}
-                  disabled={busyState !== "idle"}
-                >
-                  Reset overrides
-                </button>
+        <section className="results-grid">
+          <article className="card">
+            <div className="card-header compact">
+              <div>
+                <p className="section-label">Step 3</p>
+                <h2>Inferred schema</h2>
               </div>
-              <div className="metrics-row">
-                <div className="metric">
-                  <span className="metric-label">Rows profiled</span>
-                  <strong>{result.rowCount.toLocaleString()}</strong>
-                </div>
-                <div className="metric">
-                  <span className="metric-label">Processed in</span>
-                  <strong>{result.processingMetadata.durationMs} ms</strong>
-                </div>
-                <div className="metric">
-                  <span className="metric-label">Run ID</span>
-                  <strong>{result.runId}</strong>
-                </div>
-                <div className="metric">
-                  <span className="metric-label">Changed overrides</span>
-                  <strong>{changedOverrideCount}</strong>
-                </div>
+              <button
+                className="secondary-button"
+                onClick={() => applySchemaDefaults(result.schema)}
+                disabled={busyState !== "idle"}
+              >
+                Reset overrides
+              </button>
+            </div>
+            <div className="metrics-row">
+              <div className="metric">
+                <span className="metric-label">Rows profiled</span>
+                <strong>{result.rowCount.toLocaleString()}</strong>
               </div>
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Column</th>
-                      <th>Detected</th>
-                      <th>Override</th>
-                      <th>Confidence</th>
-                      <th>Samples</th>
+              <div className="metric">
+                <span className="metric-label">Processed in</span>
+                <strong>{result.processingMetadata.durationMs} ms</strong>
+              </div>
+              <div className="metric">
+                <span className="metric-label">Run ID</span>
+                <strong>{result.runId}</strong>
+              </div>
+              <div className="metric">
+                <span className="metric-label">Changed overrides</span>
+                <strong>{changedOverrideCount}</strong>
+              </div>
+            </div>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Column</th>
+                    <th>Detected</th>
+                    <th>Override</th>
+                    <th>Confidence</th>
+                    <th>Samples</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {result.schema.map((column) => (
+                    <tr key={column.column}>
+                      <td>{column.column}</td>
+                      <td>{column.display_type}</td>
+                      <td>
+                        <select
+                          value={overrides[column.column] ?? column.inferred_type}
+                          onChange={(event) =>
+                            setOverrides((current) => ({
+                              ...current,
+                              [column.column]: event.target.value,
+                            }))
+                          }
+                        >
+                          {column.allowed_overrides.map((option) => (
+                            <option key={option} value={option}>
+                              {typeLabelOverrides[option] ?? option}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                      <td>{Math.round(column.confidence * 100)}%</td>
+                      <td>{column.sample_values.join(", ") || "No non-null sample"}</td>
                     </tr>
-                  </thead>
-                  <tbody>
-                    {result.schema.map((column) => (
-                      <tr key={column.column}>
-                        <td>{column.column}</td>
-                        <td>{column.display_type}</td>
-                        <td>
-                          <select
-                            value={overrides[column.column] ?? column.inferred_type}
-                            onChange={(event) =>
-                              setOverrides((current) => ({
-                                ...current,
-                                [column.column]: event.target.value,
-                              }))
-                            }
-                          >
-                            {column.allowed_overrides.map((option) => (
-                              <option key={option} value={option}>
-                                {typeLabelOverrides[option] ?? option}
-                              </option>
-                            ))}
-                          </select>
-                        </td>
-                        <td>{Math.round(column.confidence * 100)}%</td>
-                        <td>{column.sample_values.join(", ") || "No non-null sample"}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              <div className="toolbar">
-                <button className="primary-button" onClick={handleProcessFile} disabled={busyState !== "idle"}>
-                  Reprocess with overrides
-                </button>
-              </div>
-            </article>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="toolbar">
+              <button className="primary-button" onClick={handleProcessFile} disabled={busyState !== "idle"}>
+                Reprocess with overrides
+              </button>
+            </div>
+          </article>
 
-            <article className="card">
-              <div className="card-header compact">
-                <div>
-                  <p className="section-label">Step 4</p>
-                  <h2>Processed preview</h2>
-                </div>
+          <article className="card">
+            <div className="card-header compact">
+              <div>
+                <p className="section-label">Step 4</p>
+                <h2>Processed preview</h2>
               </div>
-              {result.warnings.length > 0 ? (
-                <div className="callout warning">
-                  <h3>Dataset warnings</h3>
-                  <ul>
-                    {result.warnings.map((warning) => (
-                      <li key={warning}>{warning}</li>
+            </div>
+            {result.warnings.length > 0 ? (
+              <div className="callout warning">
+                <h3>Dataset warnings</h3>
+                <ul>
+                  {result.warnings.map((warning) => (
+                    <li key={warning}>{warning}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            {formatColumnWarnings(result.schema)}
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    {result.previewColumns.map((column) => (
+                      <th key={column}>{column}</th>
                     ))}
-                  </ul>
-                </div>
-              ) : null}
-              {formatColumnWarnings(result.schema)}
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
+                  </tr>
+                </thead>
+                <tbody>
+                  {result.previewRows.map((row, index) => (
+                    <tr key={`row-${index}`}>
                       {result.previewColumns.map((column) => (
-                        <th key={column}>{column}</th>
+                        <td key={`${index}-${column}`}>{String(row[column] ?? "")}</td>
                       ))}
                     </tr>
-                  </thead>
-                  <tbody>
-                    {result.previewRows.map((row, index) => (
-                      <tr key={`row-${index}`}>
-                        {result.previewColumns.map((column) => (
-                          <td key={`${index}-${column}`}>{String(row[column] ?? "")}</td>
-                        ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </article>
-          </section>
-        </>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </article>
+        </section>
       ) : null}
     </main>
   );

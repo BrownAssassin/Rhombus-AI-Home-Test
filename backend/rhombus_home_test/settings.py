@@ -16,15 +16,34 @@ def env_list(name: str, default: list[str]) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def merge_unique(base: list[str], extras: list[str]) -> list[str]:
+    merged = list(base)
+    for item in extras:
+        if item and item not in merged:
+            merged.append(item)
+    return merged
+
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 REPO_ROOT = BASE_DIR.parent
 FRONTEND_DIR = REPO_ROOT / "frontend"
 FRONTEND_BUILD_DIR = Path(os.getenv("DJANGO_FRONTEND_BUILD_DIR", FRONTEND_DIR / "dist"))
+RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME", "").strip()
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").strip()
 
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "django-insecure-rhombus-home-test")
 DEBUG = env_bool("DJANGO_DEBUG", True)
-ALLOWED_HOSTS = env_list("DJANGO_ALLOWED_HOSTS", ["*"])
-CSRF_TRUSTED_ORIGINS = env_list("DJANGO_CSRF_TRUSTED_ORIGINS", [])
+
+# Render publishes the canonical onrender.com host and origin at runtime, so
+# fold them into Django's trust lists instead of making every deploy restate them.
+ALLOWED_HOSTS = merge_unique(
+    env_list("DJANGO_ALLOWED_HOSTS", ["localhost", "127.0.0.1"]),
+    [RENDER_EXTERNAL_HOSTNAME],
+)
+CSRF_TRUSTED_ORIGINS = merge_unique(
+    env_list("DJANGO_CSRF_TRUSTED_ORIGINS", []),
+    [RENDER_EXTERNAL_URL],
+)
 
 INSTALLED_APPS = [
     "django.contrib.admin",

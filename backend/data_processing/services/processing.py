@@ -162,6 +162,8 @@ def _download_object_to_temp_file(client, bucket: str, object_key: str) -> tuple
             raise FileTooLargeError(
                 f"Excel files larger than {MAX_EXCEL_SIZE_BYTES // (1024 * 1024)} MB are rejected in this MVP."
             )
+        # Pandas' Excel readers expect a local file and load whole sheets into
+        # memory, so we cap size early and stage the object in temp storage.
         temp_file = tempfile.NamedTemporaryFile(suffix=Path(object_key).suffix, delete=False)
         client.download_fileobj(bucket, object_key, temp_file)
         temp_file.flush()
@@ -315,6 +317,8 @@ def _process_csv(client, bucket: str, object_key: str, overrides: dict[str, str]
     preview_rows: list[dict[str, Any]] = []
     preview_columns: list[str] = columns
     if row_count > 0:
+        # The second streaming pass keeps memory bounded while still returning
+        # preview rows after inference and conversions have been finalized.
         for chunk in _read_csv_chunks(client, bucket, object_key):
             converted = convert_dataframe(chunk, schema)
             preview_columns, chunk_rows = dataframe_preview(converted, max(preview_row_limit - len(preview_rows), 0))
@@ -383,6 +387,8 @@ def _process_local_csv(file_path: Path, overrides: dict[str, str], preview_row_l
     preview_rows: list[dict[str, Any]] = []
     preview_columns: list[str] = columns
     if row_count > 0:
+        # Mirror the S3 flow locally so preview output matches the chunked
+        # inference behavior users see through the web application.
         for chunk in _read_local_csv_chunks(file_path):
             converted = convert_dataframe(chunk, schema)
             preview_columns, chunk_rows = dataframe_preview(converted, max(preview_row_limit - len(preview_rows), 0))

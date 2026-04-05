@@ -5,8 +5,8 @@ Single-host Django + React application for browsing CSV and Excel files in Amazo
 ## What it does
 
 - Connects to S3 using runtime AWS credentials supplied by the user.
-- Lists supported `.csv`, `.xls`, and `.xlsx` objects from a bucket/prefix.
-- Profiles columns with stricter inference rules for integers, floats, booleans, dates, datetimes, categories, and complex numbers.
+- Lists supported `.csv`, `.xls`, and `.xlsx` objects from a bucket or prefix.
+- Profiles columns with conservative inference rules for integers, floats, booleans, dates, datetimes, categories, and complex numbers.
 - Lets the user override inferred types before reprocessing.
 - Stores sanitized processing metadata in Django without persisting AWS secrets.
 - Exposes a local CLI via `infer_data_types.py` for quick local-file smoke testing.
@@ -21,15 +21,17 @@ Single-host Django + React application for browsing CSV and Excel files in Amazo
 
 - `backend/`: Django project and the `data_processing` app
 - `frontend/`: React + TypeScript frontend
+- `docs/brief/`: assignment brief and supporting project notes
+- `examples/`: sample datasets for local smoke testing
 - `infer_data_types.py`: local CLI wrapper around the shared processing service
-- `sample_data.csv`: simple local sample dataset
 - `Dockerfile`: production-oriented single-container deployment
 
 ## Requirements
 
 - Python 3.12 recommended for local work to match the Docker runtime
-- Node.js 22+ recommended
-- npm 11+
+- Node.js 22 or newer recommended
+- npm 11 or newer
+- Docker Desktop for container verification and deployment builds
 
 The current dependency set also installs and runs on Python 3.14, but keeping local development on Python 3.12 reduces drift from the containerized runtime.
 
@@ -38,7 +40,7 @@ The current dependency set also installs and runs on Python 3.14, but keeping lo
 ### 1. Create the backend environment
 
 ```powershell
-python -m venv .venv
+py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 ```
@@ -59,7 +61,7 @@ python manage.py migrate
 
 ## Running the app locally
 
-### Backend + built frontend
+### Backend plus built frontend
 
 Build the frontend once, then let Django serve it:
 
@@ -74,13 +76,13 @@ Open `http://127.0.0.1:8000`.
 
 ### Split development mode
 
-Run Django for the API and Vite for the frontend:
+Run Django for the API:
 
 ```powershell
 python manage.py runserver
 ```
 
-In a second terminal:
+In a second terminal, run Vite for the frontend:
 
 ```powershell
 cd frontend
@@ -101,27 +103,29 @@ The app works locally without extra configuration, but these variables are suppo
 - `DJANGO_FRONTEND_BUILD_DIR`: optional override for the built frontend location
 - `PORT`: port used by the container startup command
 
-See `.env.example` for a starter set of values.
+On Render, `RENDER_EXTERNAL_HOSTNAME` and `RENDER_EXTERNAL_URL` are injected automatically and merged into Django's trusted host and origin lists. You only need to set `DJANGO_ALLOWED_HOSTS` or `DJANGO_CSRF_TRUSTED_ORIGINS` manually if you later add a custom domain.
+
+See `.env.example` for a starter local or container configuration.
 
 ## CLI usage
 
 The local CLI uses the same inference service as the web application:
 
 ```powershell
-python infer_data_types.py sample_data.csv --preview-rows 5
+python infer_data_types.py examples/sample_data.csv --preview-rows 5
 ```
 
 Optional Excel sheet selection:
 
 ```powershell
-python infer_data_types.py path\\to\\workbook.xlsx --sheet-name Sheet1
+python infer_data_types.py path\to\workbook.xlsx --sheet-name Sheet1
 ```
 
 ## API summary
 
 ### `POST /api/s3/files`
 
-Lists supported S3 objects for a bucket/prefix.
+Lists supported S3 objects for a bucket or prefix.
 
 Request body:
 
@@ -176,23 +180,21 @@ npm test
 npm run build
 ```
 
-## Deployment
+CLI smoke test:
 
-This repository includes a production-oriented `Dockerfile` that:
+```powershell
+python infer_data_types.py examples/sample_data.csv --preview-rows 5
+```
 
-- installs Python dependencies
-- builds the React frontend
-- collects static files
-- runs migrations on container start
-- serves the app with Gunicorn
+## Docker verification
 
-### Build the image
+Build the production image:
 
 ```powershell
 docker build -t rhombus-home-test .
 ```
 
-### Run the container
+Run the container locally:
 
 ```powershell
 docker run --rm -p 8000:8000 `
@@ -204,10 +206,44 @@ docker run --rm -p 8000:8000 `
 
 Then open `http://127.0.0.1:8000`.
 
+## Render deployment
+
+Render is the recommended public host for this project because it matches the app's single-container architecture and gives you one public URL for both the Django API and the React frontend.
+
+### Create the service
+
+1. Sign in to Render and create a new Web Service.
+2. Connect the GitHub repository `BrownAssassin/Rhombus-AI-Home-Test`.
+3. Select the `main` branch.
+4. Choose `Docker` as the runtime so Render builds from the repository `Dockerfile`.
+5. Set the health check path to `/api/health/`.
+
+### Configure environment variables
+
+Add these values in the Render dashboard before the first deploy:
+
+- `DJANGO_SECRET_KEY`: required secret value for Django
+- `DJANGO_DEBUG=False`
+
+Optional settings:
+
+- `DJANGO_ALLOWED_HOSTS`: only needed if you later add a custom domain
+- `DJANGO_CSRF_TRUSTED_ORIGINS`: only needed if you later add a custom domain
+- `DJANGO_SQLITE_PATH=/app/data/db.sqlite3`: only needed if you later attach a persistent disk and want the SQLite file to survive redeploys
+
+Render automatically provides `PORT`, `RENDER_EXTERNAL_HOSTNAME`, and `RENDER_EXTERNAL_URL`, and the app is configured to trust those values without any extra setup.
+
+### Deploy and verify
+
+1. Trigger the initial deploy from Render.
+2. Open the generated `onrender.com` URL after the health check passes.
+3. Confirm `GET /api/health/` returns a healthy response.
+4. Run one end-to-end flow through the UI with a real or demo S3 bucket.
+
 ## Notes and limitations
 
 - AWS credentials are accepted at runtime and are intentionally not stored in the database.
 - CSV handling is chunked for profiling and preview generation; Excel handling is capped at 20 MB in this MVP.
 - Type inference is intentionally conservative. Ambiguous date columns stay as text unless the user overrides them.
 - The app currently returns a processed preview rather than exporting a full transformed file.
-- A public deployment URL is not included in this repository because deployment credentials and hosting configuration are environment-specific.
+- A Render deployment that keeps SQLite in the container filesystem is suitable for demos, but `ProcessingRun` history resets whenever the service is rebuilt or restarted.

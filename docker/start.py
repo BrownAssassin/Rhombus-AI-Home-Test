@@ -7,6 +7,8 @@ import sys
 
 def main() -> int:
     subprocess.run([sys.executable, "manage.py", "migrate", "--noinput"], check=True)
+    # Render injects the listening port at runtime, so Gunicorn must bind to
+    # that value after the one-time startup tasks complete.
     port = os.getenv("PORT", "8000")
     os.execvp(
         "gunicorn",

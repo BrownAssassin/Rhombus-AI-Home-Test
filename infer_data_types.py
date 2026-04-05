@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 
 REPO_ROOT = Path(__file__).resolve().parent
+# The shared services live in the Django app package under ./backend.
 sys.path.insert(0, str(REPO_ROOT / "backend"))
 
 from data_processing.services.processing import ProcessingServiceError, process_local_file
@@ -12,7 +13,12 @@ from data_processing.services.processing import ProcessingServiceError, process_
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Infer column types for a local CSV or Excel file.")
-    parser.add_argument("path", nargs="?", default="sample_data.csv", help="Path to a CSV, XLS, or XLSX file.")
+    parser.add_argument(
+        "path",
+        nargs="?",
+        default="examples/sample_data.csv",
+        help="Path to a CSV, XLS, or XLSX file.",
+    )
     parser.add_argument("--sheet-name", default="", help="Optional Excel sheet name.")
     parser.add_argument(
         "--preview-rows",
