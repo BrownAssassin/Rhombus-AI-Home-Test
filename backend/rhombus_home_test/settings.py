@@ -103,7 +103,7 @@ USE_TZ = True
 
 STATIC_URL = "/static/"
 STATIC_ROOT = REPO_ROOT / "backend" / "static"
-STATICFILES_DIRS = [FRONTEND_BUILD_DIR / "assets"] if (FRONTEND_BUILD_DIR / "assets").exists() else []
+STATICFILES_DIRS = [FRONTEND_BUILD_DIR] if FRONTEND_BUILD_DIR.exists() else []
 STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
