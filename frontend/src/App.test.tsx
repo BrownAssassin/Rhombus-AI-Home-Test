@@ -93,4 +93,93 @@ describe("App", () => {
     expect(screen.getByRole("cell", { name: "Score" })).toBeInTheDocument();
     expect(screen.getByDisplayValue("Float")).toBeInTheDocument();
   });
+
+  it("resets overrides back to the detected schema after reprocessing", async () => {
+    const fetchMock = vi.fn();
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          files: [{ key: "sample.csv", size: 147, lastModified: "2026-04-03T00:00:00Z", format: "csv" }],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          runId: 1,
+          rowCount: 5,
+          schema: [
+            {
+              column: "Score",
+              inferred_type: "float",
+              storage_type: "Float64",
+              display_type: "Float",
+              nullable: true,
+              confidence: 0.97,
+              warnings: [],
+              null_token_count: 1,
+              sample_values: ["90", "75"],
+              allowed_overrides: ["text", "integer", "float", "boolean", "date", "datetime", "category", "complex"],
+            },
+          ],
+          previewColumns: ["Score"],
+          previewRows: [{ Score: 90 }, { Score: 75 }],
+          warnings: [],
+          processingMetadata: { durationMs: 11.2, previewRowLimit: 100, chunkSize: 5000 },
+          selectedSheet: "",
+          fileType: "csv",
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          runId: 2,
+          rowCount: 5,
+          schema: [
+            {
+              column: "Score",
+              inferred_type: "text",
+              storage_type: "string",
+              display_type: "Text",
+              nullable: true,
+              confidence: 0.97,
+              warnings: [],
+              null_token_count: 1,
+              sample_values: ["90", "75"],
+              allowed_overrides: ["text", "integer", "float", "boolean", "date", "datetime", "category", "complex"],
+            },
+          ],
+          previewColumns: ["Score"],
+          previewRows: [{ Score: "90" }, { Score: "75" }],
+          warnings: [],
+          processingMetadata: { durationMs: 12.1, previewRowLimit: 100, chunkSize: 5000 },
+          selectedSheet: "",
+          fileType: "csv",
+        }),
+      });
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+
+    fireEvent.change(screen.getByLabelText(/Access key ID/i), { target: { value: "AKIA123" } });
+    fireEvent.change(screen.getByLabelText(/Secret access key/i), { target: { value: "secret" } });
+    fireEvent.change(screen.getByLabelText(/^Bucket$/i), { target: { value: "demo-bucket" } });
+    fireEvent.click(screen.getByRole("button", { name: /Browse files/i }));
+
+    await waitFor(() => expect(screen.getByRole("button", { name: /sample\.csv/i })).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /Process selection/i }));
+    await waitFor(() => expect(screen.getByDisplayValue("Float")).toBeInTheDocument());
+
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "text" } });
+    expect(screen.getByDisplayValue("Text")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Reprocess with overrides/i }));
+    await waitFor(() => expect(screen.getByDisplayValue("Text")).toBeInTheDocument());
+    expect(screen.getByRole("cell", { name: "Float" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Reset overrides/i }));
+    expect(screen.getByDisplayValue("Float")).toBeInTheDocument();
+  });
 });

@@ -23,6 +23,10 @@ const typeLabelOverrides: Record<string, string> = {
   complex: "Complex",
 };
 
+function schemaToOverrides(schema: ColumnInferenceResult[]): Record<string, string> {
+  return Object.fromEntries(schema.map((column) => [column.column, column.inferred_type]));
+}
+
 function formatBytes(value: number): string {
   if (value < 1024) {
     return `${value} B`;
@@ -57,11 +61,13 @@ export default function App() {
   const [selectedKey, setSelectedKey] = useState("");
   const [sheetName, setSheetName] = useState("");
   const [result, setResult] = useState<ProcessResponse | null>(null);
+  const [detectedSchema, setDetectedSchema] = useState<ColumnInferenceResult[]>([]);
   const [overrides, setOverrides] = useState<Record<string, string>>({});
   const [busyState, setBusyState] = useState<"idle" | "listing" | "processing">("idle");
   const [error, setError] = useState("");
 
   const selectedFile = files.find((item) => item.key === selectedKey) ?? null;
+  const displayedSchema = detectedSchema.length > 0 ? detectedSchema : result?.schema ?? [];
   const missingConnectionFields = [
     !credentials.access_key_id && "access key ID",
     !credentials.secret_access_key && "secret access key",
@@ -69,10 +75,9 @@ export default function App() {
     !credentials.bucket && "bucket",
   ].filter(Boolean) as string[];
   const hasConnectionDetails = missingConnectionFields.length === 0;
-  const changedOverrideCount = result
-    ? result.schema.filter((column) => (overrides[column.column] ?? column.inferred_type) !== column.inferred_type)
-        .length
-    : 0;
+  const changedOverrideCount = displayedSchema.filter(
+    (column) => (overrides[column.column] ?? column.inferred_type) !== column.inferred_type,
+  ).length;
 
   function updateCredentialField(field: keyof S3CredentialsInput, value: string) {
     startTransition(() => {
@@ -92,6 +97,8 @@ export default function App() {
     setBusyState("listing");
     setError("");
     setResult(null);
+    setDetectedSchema([]);
+    setOverrides({});
     try {
       const nextFiles = await fetchS3Files(credentials);
       setFiles(nextFiles);
@@ -123,15 +130,28 @@ export default function App() {
     setError("");
 
     try {
+      const baselineSchema = displayedSchema;
+      const baselineOverrides = schemaToOverrides(baselineSchema);
+      const effectiveOverrides = Object.entries(overrides)
+        .filter(([column, target_type]) => target_type !== baselineOverrides[column])
+        .map(([column, target_type]) => ({ column, target_type }));
       const nextResult = await processFile({
         credentials,
         objectKey: selectedKey,
         sheetName,
         previewRowLimit: 100,
-        overrides: Object.entries(overrides).map(([column, target_type]) => ({ column, target_type })),
+        overrides: effectiveOverrides,
       });
       setResult(nextResult);
-      setOverrides(Object.fromEntries(nextResult.schema.map((column) => [column.column, column.inferred_type])));
+      if (baselineSchema.length === 0 || effectiveOverrides.length === 0) {
+        setDetectedSchema(nextResult.schema);
+        setOverrides(schemaToOverrides(nextResult.schema));
+      } else {
+        setOverrides({
+          ...baselineOverrides,
+          ...Object.fromEntries(effectiveOverrides.map(({ column, target_type }) => [column, target_type])),
+        });
+      }
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "Unable to process file.");
     } finally {
@@ -139,12 +159,15 @@ export default function App() {
     }
   }
 
-  function applySchemaDefaults(schema: ColumnInferenceResult[]) {
-    setOverrides(Object.fromEntries(schema.map((column) => [column.column, column.inferred_type])));
+  function applySchemaDefaults() {
+    setOverrides(schemaToOverrides(displayedSchema));
   }
 
   function handleSelectFile(file: S3File) {
     setSelectedKey(file.key);
+    setResult(null);
+    setDetectedSchema([]);
+    setOverrides({});
     if (file.format !== "excel") {
       setSheetName("");
     }
@@ -306,8 +329,8 @@ export default function App() {
               </div>
               <button
                 className="secondary-button"
-                onClick={() => applySchemaDefaults(result.schema)}
-                disabled={busyState !== "idle"}
+                onClick={applySchemaDefaults}
+                disabled={busyState !== "idle" || displayedSchema.length === 0}
               >
                 Reset overrides
               </button>
@@ -342,7 +365,7 @@ export default function App() {
                   </tr>
                 </thead>
                 <tbody>
-                  {result.schema.map((column) => (
+                  {displayedSchema.map((column) => (
                     <tr key={column.column}>
                       <td>{column.column}</td>
                       <td>{column.display_type}</td>
