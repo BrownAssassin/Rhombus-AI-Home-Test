@@ -1,4 +1,11 @@
 :root {
+  --panel-radius: 22px;
+  --control-radius: 16px;
+  --control-height: 3rem;
+  --panel-padding: 1.5rem;
+  --surface-card: rgba(18, 21, 28, 0.84);
+  --surface-muted: rgba(255, 255, 255, 0.04);
+  --border-subtle: rgba(255, 255, 255, 0.1);
   font-family: "Space Grotesk", "Segoe UI", sans-serif;
   color: #f8f4ea;
   background:
@@ -31,6 +38,7 @@ select {
 
 button {
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .page-shell {
@@ -40,8 +48,8 @@ button {
 }
 
 .hero-panel {
-  padding: 2rem;
-  border-radius: 24px;
+  padding: calc(var(--panel-padding) + 0.5rem);
+  border-radius: calc(var(--panel-radius) + 2px);
   border: 1px solid rgba(255, 255, 255, 0.12);
   background: rgba(18, 21, 28, 0.72);
   backdrop-filter: blur(18px);
@@ -86,10 +94,14 @@ button {
 }
 
 .card {
-  padding: 1.5rem;
-  border-radius: 22px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(18, 21, 28, 0.84);
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
+  padding: var(--panel-padding);
+  border-radius: var(--panel-radius);
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-card);
   box-shadow: 0 18px 40px rgba(0, 0, 0, 0.24);
 }
 
@@ -97,8 +109,14 @@ button {
   display: flex;
   justify-content: space-between;
   gap: 1rem;
-  align-items: flex-start;
-  margin-bottom: 1.1rem;
+  align-items: start;
+  margin-bottom: 0;
+}
+
+.card-header > div {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 0;
 }
 
 .card-header.compact h2 {
@@ -121,11 +139,26 @@ label {
 input,
 select {
   width: 100%;
+  min-height: var(--control-height);
   padding: 0.8rem 0.95rem;
-  border-radius: 14px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--control-radius);
+  border: 1px solid var(--border-subtle);
   background: rgba(8, 10, 14, 0.7);
   color: #f8f4ea;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease,
+    background-color 160ms ease;
+}
+
+input:focus,
+select:focus {
+  outline: none;
+  border-color: rgba(242, 179, 107, 0.52);
+  box-shadow:
+    0 0 0 3px rgba(242, 179, 107, 0.14),
+    inset 0 1px 0 rgba(255, 255, 255, 0.03);
 }
 
 input::placeholder {
@@ -136,7 +169,15 @@ input::placeholder {
 .secondary-button {
   border: none;
   border-radius: 999px;
-  padding: 0.85rem 1.2rem;
+  min-height: var(--control-height);
+  min-width: 9.25rem;
+  padding: 0.85rem 1.35rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  font-size: 0.92rem;
+  font-weight: 700;
   transition:
     transform 160ms ease,
     opacity 160ms ease,
@@ -146,7 +187,7 @@ input::placeholder {
 .primary-button {
   background: linear-gradient(135deg, #f2b36b, #d66c4a);
   color: #111319;
-  font-weight: 700;
+  box-shadow: 0 10px 26px rgba(214, 108, 74, 0.2);
 }
 
 .secondary-button {
@@ -167,13 +208,13 @@ input::placeholder {
 }
 
 .helper-text {
-  margin-bottom: 0;
+  margin: 0;
   color: rgba(248, 244, 234, 0.6);
 }
 
 .empty-state {
   border: 1px dashed rgba(255, 255, 255, 0.18);
-  border-radius: 16px;
+  border-radius: var(--control-radius);
   padding: 1rem;
   color: rgba(248, 244, 234, 0.72);
 }
@@ -183,19 +224,29 @@ input::placeholder {
   gap: 0.8rem;
   max-height: 320px;
   overflow-y: auto;
-  margin-bottom: 1rem;
+  padding-right: 0.25rem;
 }
 
 .file-item {
   display: flex;
   justify-content: space-between;
+  align-items: center;
   gap: 1rem;
+  min-height: 3.5rem;
   padding: 0.9rem 1rem;
   text-align: left;
-  border-radius: 16px;
+  border-radius: var(--control-radius);
   border: 1px solid rgba(255, 255, 255, 0.08);
   background: rgba(255, 255, 255, 0.03);
   color: inherit;
+}
+
+.file-item span:last-child {
+  min-width: 7rem;
+  text-align: right;
+  flex-shrink: 0;
+  color: rgba(248, 244, 234, 0.72);
+  font-size: 0.84rem;
 }
 
 .file-item.selected {
@@ -233,13 +284,16 @@ input::placeholder {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 0.8rem;
-  margin-bottom: 1rem;
 }
 
 .metric {
-  padding: 0.95rem;
+  min-height: 4.75rem;
+  padding: 0.95rem 1rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
   border-radius: 18px;
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--surface-muted);
 }
 
 .metric-label {
@@ -250,15 +304,21 @@ input::placeholder {
 }
 
 .toolbar {
-  margin-top: 1rem;
+  margin-top: auto;
   display: flex;
   justify-content: flex-end;
 }
 
 .table-wrap {
+  flex: 1;
   overflow-x: auto;
-  border-radius: 16px;
+  border-radius: var(--control-radius);
   border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.table-wrap select {
+  min-width: 5.5rem;
 }
 
 table {
@@ -302,10 +362,22 @@ tbody tr:nth-child(odd) {
 
   .card-header {
     flex-direction: column;
+    align-items: stretch;
+  }
+
+  .primary-button,
+  .secondary-button {
+    width: 100%;
+    min-width: 0;
   }
 
   .file-item {
     flex-direction: column;
+    align-items: start;
+  }
+
+  .file-item span:last-child {
+    min-width: 0;
+    text-align: left;
   }
 }
-
