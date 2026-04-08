@@ -3,6 +3,10 @@ import { startTransition, useState, type JSX } from "react";
 import { fetchS3Files, processFile } from "./api";
 import type { ColumnInferenceResult, ProcessResponse, S3CredentialsInput, S3File } from "./types";
 
+type ViewState = "connection" | "workbench";
+
+const PAGE_SIZE_OPTIONS = [25, 50, 100] as const;
+
 const defaultCredentials: S3CredentialsInput = {
   access_key_id: "",
   secret_access_key: "",
@@ -56,6 +60,7 @@ function formatColumnWarnings(schema: ColumnInferenceResult[]): JSX.Element | nu
 }
 
 export default function App() {
+  const [view, setView] = useState<ViewState>("connection");
   const [credentials, setCredentials] = useState<S3CredentialsInput>(defaultCredentials);
   const [files, setFiles] = useState<S3File[]>([]);
   const [selectedKey, setSelectedKey] = useState("");
@@ -63,11 +68,21 @@ export default function App() {
   const [result, setResult] = useState<ProcessResponse | null>(null);
   const [detectedSchema, setDetectedSchema] = useState<ColumnInferenceResult[]>([]);
   const [overrides, setOverrides] = useState<Record<string, string>>({});
+  const [rowsPerPage, setRowsPerPage] = useState<number>(25);
+  const [currentPage, setCurrentPage] = useState<number>(1);
   const [busyState, setBusyState] = useState<"idle" | "listing" | "processing">("idle");
   const [error, setError] = useState("");
 
   const selectedFile = files.find((item) => item.key === selectedKey) ?? null;
   const displayedSchema = detectedSchema.length > 0 ? detectedSchema : result?.schema ?? [];
+  const previewRows = result?.previewRows ?? [];
+  const totalPreviewRows = previewRows.length;
+  const totalPages = Math.max(1, Math.ceil(totalPreviewRows / rowsPerPage));
+  const safeCurrentPage = Math.min(currentPage, totalPages);
+  const pageStart = totalPreviewRows === 0 ? 0 : (safeCurrentPage - 1) * rowsPerPage;
+  const paginatedPreviewRows = previewRows.slice(pageStart, pageStart + rowsPerPage);
+  const previewRangeStart = totalPreviewRows === 0 ? 0 : pageStart + 1;
+  const previewRangeEnd = totalPreviewRows === 0 ? 0 : pageStart + paginatedPreviewRows.length;
   const missingConnectionFields = [
     !credentials.access_key_id && "access key ID",
     !credentials.secret_access_key && "secret access key",
@@ -78,6 +93,13 @@ export default function App() {
   const changedOverrideCount = displayedSchema.filter(
     (column) => (overrides[column.column] ?? column.inferred_type) !== column.inferred_type,
   ).length;
+
+  function resetWorkbenchState() {
+    setResult(null);
+    setDetectedSchema([]);
+    setOverrides({});
+    setCurrentPage(1);
+  }
 
   function updateCredentialField(field: keyof S3CredentialsInput, value: string) {
     startTransition(() => {
@@ -96,9 +118,8 @@ export default function App() {
 
     setBusyState("listing");
     setError("");
-    setResult(null);
-    setDetectedSchema([]);
-    setOverrides({});
+    resetWorkbenchState();
+
     try {
       const nextFiles = await fetchS3Files(credentials);
       setFiles(nextFiles);
@@ -107,8 +128,10 @@ export default function App() {
         setSelectedKey(nextFiles[0]?.key ?? "");
       }
       if (nextFiles.length === 0) {
+        setSelectedKey("");
         setSheetName("");
       }
+      setView("workbench");
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "Unable to load files.");
     } finally {
@@ -133,7 +156,7 @@ export default function App() {
       const baselineSchema = displayedSchema;
       const baselineOverrides = schemaToOverrides(baselineSchema);
       const effectiveOverrides = Object.entries(overrides)
-        .filter(([column, target_type]) => target_type !== baselineOverrides[column])
+        .filter(([column, targetType]) => targetType !== baselineOverrides[column])
         .map(([column, target_type]) => ({ column, target_type }));
       const nextResult = await processFile({
         credentials,
@@ -142,7 +165,9 @@ export default function App() {
         previewRowLimit: 100,
         overrides: effectiveOverrides,
       });
+
       setResult(nextResult);
+      setCurrentPage(1);
       if (baselineSchema.length === 0 || effectiveOverrides.length === 0) {
         setDetectedSchema(nextResult.schema);
         setOverrides(schemaToOverrides(nextResult.schema));
@@ -165,9 +190,7 @@ export default function App() {
 
   function handleSelectFile(file: S3File) {
     setSelectedKey(file.key);
-    setResult(null);
-    setDetectedSchema([]);
-    setOverrides({});
+    resetWorkbenchState();
     if (file.format !== "excel") {
       setSheetName("");
     }
@@ -176,271 +199,394 @@ export default function App() {
     }
   }
 
+  function handleEditConnection() {
+    setView("connection");
+    if (error) {
+      setError("");
+    }
+  }
+
+  function handleRowsPerPageChange(value: number) {
+    setRowsPerPage(value);
+    setCurrentPage(1);
+  }
+
+  function goToNextPage() {
+    setCurrentPage((page) => Math.min(page + 1, totalPages));
+  }
+
+  function goToPreviousPage() {
+    setCurrentPage((page) => Math.max(page - 1, 1));
+  }
+
   return (
     <main className="page-shell">
-      <section className="hero-panel">
-        <p className="eyebrow">Rhombus AI Home Test</p>
-        <h1>S3 data type inference workbench</h1>
-        <p className="hero-copy">
-          Connect to S3, select a CSV or Excel file, profile the schema with stricter inference rules, and manually
-          override any column before previewing the processed data.
-        </p>
-      </section>
+      {view === "connection" ? (
+        <>
+          <section className="hero-panel">
+            <p className="eyebrow">Rhombus AI Home Test</p>
+            <h1>S3 data type inference workbench</h1>
+            <p className="hero-copy">
+              Connect to S3, select a CSV or Excel file, profile the schema with stricter inference rules, and manually
+              override any column before previewing the processed data.
+            </p>
+          </section>
 
-      <section className="card-grid">
-        <article className="card">
-          <div className="card-header">
-            <div>
-              <p className="section-label">Step 1</p>
-              <h2>S3 connection</h2>
-            </div>
-            <button
-              className="primary-button"
-              onClick={handleBrowseFiles}
-              disabled={busyState !== "idle" || !hasConnectionDetails}
-            >
-              {busyState === "listing" ? "Loading files..." : "Browse files"}
-            </button>
-          </div>
-          <div className="field-grid">
-            <label>
-              Access key ID
-              <input
-                value={credentials.access_key_id}
-                onChange={(event) => updateCredentialField("access_key_id", event.target.value)}
-                placeholder="AKIA..."
-              />
-            </label>
-            <label>
-              Secret access key
-              <input
-                type="password"
-                value={credentials.secret_access_key}
-                onChange={(event) => updateCredentialField("secret_access_key", event.target.value)}
-                placeholder="AWS secret"
-              />
-            </label>
-            <label>
-              Session token
-              <input
-                value={credentials.session_token}
-                onChange={(event) => updateCredentialField("session_token", event.target.value)}
-                placeholder="Optional temporary token"
-              />
-            </label>
-            <label>
-              Region
-              <input
-                value={credentials.region}
-                onChange={(event) => updateCredentialField("region", event.target.value)}
-                placeholder="ap-southeast-2"
-              />
-            </label>
-            <label>
-              Bucket
-              <input
-                value={credentials.bucket}
-                onChange={(event) => updateCredentialField("bucket", event.target.value)}
-                placeholder="my-data-bucket"
-              />
-            </label>
-            <label>
-              Prefix
-              <input
-                value={credentials.prefix}
-                onChange={(event) => updateCredentialField("prefix", event.target.value)}
-                placeholder="optional/folder/"
-              />
-            </label>
-          </div>
-          <p className="helper-text">Credentials stay in component state only. They are never saved to local storage by this app.</p>
-          {!hasConnectionDetails ? (
-            <p className="helper-text">Required before browsing: {missingConnectionFields.join(", ")}.</p>
-          ) : null}
-        </article>
+          {error ? <div className="callout danger">{error}</div> : null}
 
-        <article className="card">
-          <div className="card-header">
-            <div>
-              <p className="section-label">Step 2</p>
-              <h2>Supported files</h2>
-            </div>
-            <button
-              className="secondary-button"
-              onClick={handleProcessFile}
-              disabled={!selectedKey || busyState !== "idle"}
-            >
-              {busyState === "processing" ? "Processing..." : "Process selection"}
-            </button>
-          </div>
-
-          {files.length === 0 ? (
-            <div className="empty-state">
-              <p>No files loaded yet. Browse the bucket to list `.csv`, `.xls`, and `.xlsx` objects.</p>
-            </div>
-          ) : (
-            <>
-              <div className="metrics-row">
-                <div className="metric">
-                  <span className="metric-label">Supported objects</span>
-                  <strong>{files.length}</strong>
+          <section className="connection-layout">
+            <article className="card">
+              <div className="card-header">
+                <div>
+                  <p className="section-label">Step 1</p>
+                  <h2>S3 connection</h2>
                 </div>
-                <div className="metric">
-                  <span className="metric-label">Selected file</span>
-                  <strong>{selectedFile?.key ?? "None"}</strong>
-                </div>
+                <button
+                  className="primary-button"
+                  onClick={handleBrowseFiles}
+                  disabled={busyState !== "idle" || !hasConnectionDetails}
+                >
+                  {busyState === "listing" ? "Loading files..." : "Browse files"}
+                </button>
               </div>
-              <div className="file-list">
-                {files.map((file) => (
-                  <button
-                    key={file.key}
-                    className={`file-item ${file.key === selectedKey ? "selected" : ""}`}
-                    onClick={() => handleSelectFile(file)}
-                  >
-                    <span>{file.key}</span>
-                    <span>{file.format.toUpperCase()} - {formatBytes(file.size)}</span>
-                  </button>
-                ))}
-              </div>
-              {selectedFile?.format === "excel" ? (
+              <div className="field-grid">
                 <label>
-                  Optional sheet name
+                  Access key ID
                   <input
-                    value={sheetName}
-                    onChange={(event) => setSheetName(event.target.value)}
-                    placeholder="First sheet if blank"
+                    value={credentials.access_key_id}
+                    onChange={(event) => updateCredentialField("access_key_id", event.target.value)}
+                    placeholder="AKIA..."
                   />
                 </label>
+                <label>
+                  Secret access key
+                  <input
+                    type="password"
+                    value={credentials.secret_access_key}
+                    onChange={(event) => updateCredentialField("secret_access_key", event.target.value)}
+                    placeholder="AWS secret"
+                  />
+                </label>
+                <label>
+                  Session token
+                  <input
+                    value={credentials.session_token}
+                    onChange={(event) => updateCredentialField("session_token", event.target.value)}
+                    placeholder="Optional temporary token"
+                  />
+                </label>
+                <label>
+                  Region
+                  <input
+                    value={credentials.region}
+                    onChange={(event) => updateCredentialField("region", event.target.value)}
+                    placeholder="ap-southeast-2"
+                  />
+                </label>
+                <label>
+                  Bucket
+                  <input
+                    value={credentials.bucket}
+                    onChange={(event) => updateCredentialField("bucket", event.target.value)}
+                    placeholder="my-data-bucket"
+                  />
+                </label>
+                <label>
+                  Prefix
+                  <input
+                    value={credentials.prefix}
+                    onChange={(event) => updateCredentialField("prefix", event.target.value)}
+                    placeholder="optional/folder/"
+                  />
+                </label>
+              </div>
+              <p className="helper-text">
+                Credentials stay in component state only. They are never saved to local storage by this app.
+              </p>
+              {!hasConnectionDetails ? (
+                <p className="helper-text">Required before browsing: {missingConnectionFields.join(", ")}.</p>
+              ) : files.length > 0 ? (
+                <p className="helper-text">Browsing again will refresh the current workbench file list and preview state.</p>
               ) : null}
-            </>
-          )}
-        </article>
-      </section>
-
-      {error ? <div className="callout danger">{error}</div> : null}
-
-      {result ? (
-        <section className="results-grid">
-          <article className="card">
-            <div className="card-header compact">
-              <div>
-                <p className="section-label">Step 3</p>
-                <h2>Inferred schema</h2>
+            </article>
+          </section>
+        </>
+      ) : (
+        <>
+          <section className="workbench-header">
+            <div>
+              <p className="eyebrow">Rhombus AI Home Test</p>
+              <h1>Processing workbench</h1>
+              <p className="hero-copy">
+                Connected to <strong>{credentials.bucket || "No bucket selected"}</strong> in <strong>{credentials.region}</strong>.
+              </p>
+            </div>
+            <div className="workbench-header-actions">
+              <div className="workbench-summary">
+                <span>{files.length} supported files</span>
+                <span>{selectedFile?.key ?? "No file selected"}</span>
               </div>
-              <button
-                className="secondary-button"
-                onClick={applySchemaDefaults}
-                disabled={busyState !== "idle" || displayedSchema.length === 0}
-              >
-                Reset overrides
+              <button className="secondary-button" onClick={handleEditConnection}>
+                Edit connection
               </button>
             </div>
-            <div className="metrics-row">
-              <div className="metric">
-                <span className="metric-label">Rows profiled</span>
-                <strong>{result.rowCount.toLocaleString()}</strong>
-              </div>
-              <div className="metric">
-                <span className="metric-label">Processed in</span>
-                <strong>{result.processingMetadata.durationMs} ms</strong>
-              </div>
-              <div className="metric">
-                <span className="metric-label">Run ID</span>
-                <strong>{result.runId}</strong>
-              </div>
-              <div className="metric">
-                <span className="metric-label">Changed overrides</span>
-                <strong>{changedOverrideCount}</strong>
-              </div>
-            </div>
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Column</th>
-                    <th>Detected</th>
-                    <th>Override</th>
-                    <th>Confidence</th>
-                    <th>Samples</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {displayedSchema.map((column) => (
-                    <tr key={column.column}>
-                      <td>{column.column}</td>
-                      <td>{column.display_type}</td>
-                      <td>
-                        <select
-                          value={overrides[column.column] ?? column.inferred_type}
-                          onChange={(event) =>
-                            setOverrides((current) => ({
-                              ...current,
-                              [column.column]: event.target.value,
-                            }))
-                          }
-                        >
-                          {column.allowed_overrides.map((option) => (
-                            <option key={option} value={option}>
-                              {typeLabelOverrides[option] ?? option}
-                            </option>
-                          ))}
-                        </select>
-                      </td>
-                      <td>{Math.round(column.confidence * 100)}%</td>
-                      <td>{column.sample_values.join(", ") || "No non-null sample"}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            <div className="toolbar">
-              <button className="primary-button" onClick={handleProcessFile} disabled={busyState !== "idle"}>
-                Reprocess with overrides
-              </button>
-            </div>
-          </article>
+          </section>
 
-          <article className="card">
-            <div className="card-header compact">
-              <div>
-                <p className="section-label">Step 4</p>
-                <h2>Processed preview</h2>
-              </div>
-            </div>
-            {result.warnings.length > 0 ? (
-              <div className="callout warning">
-                <h3>Dataset warnings</h3>
-                <ul>
-                  {result.warnings.map((warning) => (
-                    <li key={warning}>{warning}</li>
-                  ))}
-                </ul>
-              </div>
-            ) : null}
-            {formatColumnWarnings(result.schema)}
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    {result.previewColumns.map((column) => (
-                      <th key={column}>{column}</th>
+          {error ? <div className="callout danger">{error}</div> : null}
+
+          <section className="workbench-layout">
+            <aside className="workbench-sidebar">
+              <article className="card">
+                <div className="card-header">
+                  <div>
+                    <p className="section-label">Step 2</p>
+                    <h2>Supported files</h2>
+                  </div>
+                  <button
+                    className="primary-button"
+                    onClick={handleProcessFile}
+                    disabled={!selectedKey || busyState !== "idle"}
+                  >
+                    {busyState === "processing" ? "Processing..." : "Process selection"}
+                  </button>
+                </div>
+
+                <div className="metrics-row">
+                  <div className="metric">
+                    <span className="metric-label">Supported objects</span>
+                    <strong>{files.length}</strong>
+                  </div>
+                  <div className="metric">
+                    <span className="metric-label">Selected file</span>
+                    <strong>{selectedFile?.key ?? "None"}</strong>
+                  </div>
+                </div>
+
+                {files.length === 0 ? (
+                  <div className="empty-state">
+                    <p>No supported files were found for this bucket or prefix.</p>
+                  </div>
+                ) : (
+                  <div className="file-list">
+                    {files.map((file) => (
+                      <button
+                        key={file.key}
+                        className={`file-item ${file.key === selectedKey ? "selected" : ""}`}
+                        onClick={() => handleSelectFile(file)}
+                      >
+                        <span>{file.key}</span>
+                        <span>{file.format.toUpperCase()} - {formatBytes(file.size)}</span>
+                      </button>
                     ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {result.previewRows.map((row, index) => (
-                    <tr key={`row-${index}`}>
-                      {result.previewColumns.map((column) => (
-                        <td key={`${index}-${column}`}>{String(row[column] ?? "")}</td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </article>
-        </section>
-      ) : null}
+                  </div>
+                )}
+
+                {selectedFile?.format === "excel" ? (
+                  <label>
+                    Optional sheet name
+                    <input
+                      value={sheetName}
+                      onChange={(event) => setSheetName(event.target.value)}
+                      placeholder="First sheet if blank"
+                    />
+                  </label>
+                ) : null}
+              </article>
+
+              <article className="card schema-card">
+                <div className="card-header compact">
+                  <div>
+                    <p className="section-label">Step 3</p>
+                    <h2>Inferred schema</h2>
+                  </div>
+                  <button
+                    className="secondary-button"
+                    onClick={applySchemaDefaults}
+                    disabled={busyState !== "idle" || displayedSchema.length === 0}
+                  >
+                    Reset overrides
+                  </button>
+                </div>
+
+                {result ? (
+                  <>
+                    <div className="metrics-row">
+                      <div className="metric">
+                        <span className="metric-label">Rows profiled</span>
+                        <strong>{result.rowCount.toLocaleString()}</strong>
+                      </div>
+                      <div className="metric">
+                        <span className="metric-label">Processed in</span>
+                        <strong>{result.processingMetadata.durationMs} ms</strong>
+                      </div>
+                      <div className="metric">
+                        <span className="metric-label">Run ID</span>
+                        <strong>{result.runId}</strong>
+                      </div>
+                      <div className="metric">
+                        <span className="metric-label">Changed overrides</span>
+                        <strong>{changedOverrideCount}</strong>
+                      </div>
+                    </div>
+
+                    <div className="table-wrap schema-table-wrap">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>Column</th>
+                            <th>Detected</th>
+                            <th>Override</th>
+                            <th>Confidence</th>
+                            <th>Samples</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {displayedSchema.map((column) => (
+                            <tr key={column.column}>
+                              <td>{column.column}</td>
+                              <td>{column.display_type}</td>
+                              <td>
+                                <select
+                                  aria-label={`Override type for ${column.column}`}
+                                  value={overrides[column.column] ?? column.inferred_type}
+                                  onChange={(event) =>
+                                    setOverrides((current) => ({
+                                      ...current,
+                                      [column.column]: event.target.value,
+                                    }))
+                                  }
+                                >
+                                  {column.allowed_overrides.map((option) => (
+                                    <option key={option} value={option}>
+                                      {typeLabelOverrides[option] ?? option}
+                                    </option>
+                                  ))}
+                                </select>
+                              </td>
+                              <td>{Math.round(column.confidence * 100)}%</td>
+                              <td>{column.sample_values.join(", ") || "No non-null sample"}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    <div className="toolbar">
+                      <button className="secondary-button" onClick={handleProcessFile} disabled={busyState !== "idle"}>
+                        Reprocess with overrides
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <div className="empty-state">
+                    <p>Process the selected file to infer its schema and manage column overrides.</p>
+                  </div>
+                )}
+              </article>
+            </aside>
+
+            <section className="workbench-main">
+              <article className="card preview-card">
+                <div className="card-header compact">
+                  <div>
+                    <p className="section-label">Step 4</p>
+                    <h2>Processed preview</h2>
+                  </div>
+                  {result ? (
+                    <label className="pagination-select">
+                      Rows per page
+                      <select
+                        aria-label="Rows per page"
+                        value={rowsPerPage}
+                        onChange={(event) => handleRowsPerPageChange(Number(event.target.value))}
+                      >
+                        {PAGE_SIZE_OPTIONS.map((option) => (
+                          <option key={option} value={option}>
+                            {option}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : null}
+                </div>
+
+                {result ? (
+                  <>
+                    {result.warnings.length > 0 ? (
+                      <div className="callout warning">
+                        <h3>Dataset warnings</h3>
+                        <ul>
+                          {result.warnings.map((warning) => (
+                            <li key={warning}>{warning}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+
+                    {formatColumnWarnings(result.schema)}
+
+                    <div className="pagination-bar">
+                      <span className="pagination-status">
+                        Preview rows {previewRangeStart}-{previewRangeEnd} of {totalPreviewRows}
+                      </span>
+                      <div className="pagination-controls">
+                        <button
+                          className="secondary-button pagination-button"
+                          aria-label="Previous page"
+                          onClick={goToPreviousPage}
+                          disabled={safeCurrentPage === 1 || totalPreviewRows === 0}
+                        >
+                          Previous
+                        </button>
+                        <span className="page-indicator">
+                          Page {safeCurrentPage} of {totalPages}
+                        </span>
+                        <button
+                          className="secondary-button pagination-button"
+                          aria-label="Next page"
+                          onClick={goToNextPage}
+                          disabled={safeCurrentPage === totalPages || totalPreviewRows === 0}
+                        >
+                          Next
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="table-wrap preview-table-wrap">
+                      <table>
+                        <thead>
+                          <tr>
+                            {result.previewColumns.map((column) => (
+                              <th key={column}>{column}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {paginatedPreviewRows.map((row, index) => (
+                            <tr key={`row-${safeCurrentPage}-${index}`}>
+                              {result.previewColumns.map((column) => (
+                                <td key={`${safeCurrentPage}-${index}-${column}`}>{String(row[column] ?? "")}</td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                ) : (
+                  <div className="empty-state">
+                    <p>
+                      {files.length === 0
+                        ? "Browse a different bucket or prefix to load supported files into the workbench."
+                        : "Select a file and process it to preview converted rows here."}
+                    </p>
+                  </div>
+                )}
+              </article>
+            </section>
+          </section>
+        </>
+      )}
     </main>
   );
 }
