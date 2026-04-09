@@ -55,6 +55,11 @@ class FileTooLargeError(ProcessingServiceError):
     code = "file_too_large"
 
 
+class InvalidPreviewPageError(ProcessingServiceError):
+    status_code = 400
+    code = "invalid_preview_page"
+
+
 @dataclass
 class S3Credentials:
     access_key_id: str
@@ -127,6 +132,64 @@ def build_schema_from_profiles(profiles, overrides: dict[str, str]) -> tuple[lis
     return schema, warnings
 
 
+def _build_preview_page_metadata(row_count: int, page: int, page_size: int) -> dict[str, Any]:
+    total_pages = max(1, (row_count + page_size - 1) // page_size) if row_count else 1
+    if page > total_pages:
+        raise InvalidPreviewPageError("The requested preview page is outside the available row range.")
+
+    return {
+        "page": page,
+        "pageSize": page_size,
+        "totalRows": row_count,
+        "totalPages": total_pages,
+        "hasPreviousPage": page > 1,
+        "hasNextPage": page < total_pages,
+    }
+
+
+def _slice_dataframe_page(df: pd.DataFrame, page: int, page_size: int) -> tuple[list[str], list[dict[str, Any]]]:
+    start = (page - 1) * page_size
+    end = start + page_size
+    page_df = df.iloc[start:end]
+    return dataframe_preview(page_df, len(page_df))
+
+
+def _paginate_converted_chunks(
+    chunks: Iterator[pd.DataFrame],
+    schema: list[dict[str, Any]],
+    *,
+    page: int,
+    page_size: int,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    start = (page - 1) * page_size
+    end = start + page_size
+    seen_rows = 0
+    page_columns = [item["column"] for item in schema]
+    page_rows: list[dict[str, Any]] = []
+
+    for chunk in chunks:
+        chunk_end = seen_rows + len(chunk)
+        if chunk_end <= start:
+            seen_rows = chunk_end
+            continue
+
+        converted = convert_dataframe(chunk, schema)
+        local_start = max(start - seen_rows, 0)
+        local_end = min(end - seen_rows, len(converted))
+        if local_start < local_end:
+            page_columns, chunk_rows = _slice_dataframe_page(
+                converted.iloc[local_start:local_end],
+                page=1,
+                page_size=local_end - local_start,
+            )
+            page_rows.extend(chunk_rows)
+        seen_rows = chunk_end
+        if seen_rows >= end:
+            break
+
+    return page_columns, page_rows
+
+
 def process_dataframe(
     df: pd.DataFrame,
     *,
@@ -141,6 +204,7 @@ def process_dataframe(
     schema, warnings = build_schema_from_profiles(profiles, overrides or {})
     converted = convert_dataframe(df, schema)
     preview_columns, preview_rows = dataframe_preview(converted, preview_row_limit)
+    preview_page = _build_preview_page_metadata(len(df), page=1, page_size=preview_row_limit)
 
     return {
         "objectKey": object_key,
@@ -150,6 +214,7 @@ def process_dataframe(
         "schema": schema,
         "previewColumns": preview_columns,
         "previewRows": preview_rows,
+        "previewPage": preview_page,
         "warnings": warnings,
     }
 
@@ -267,6 +332,57 @@ def process_s3_object(
     return result
 
 
+def fetch_s3_preview_page(
+    *,
+    credentials: S3Credentials,
+    object_key: str,
+    file_type: str,
+    selected_sheet: str,
+    schema: list[dict[str, Any]],
+    row_count: int,
+    page: int,
+    page_size: int,
+    preview_columns: list[str] | None = None,
+) -> dict[str, Any]:
+    preview_page = _build_preview_page_metadata(row_count, page=page, page_size=page_size)
+    page_columns = preview_columns or [item["column"] for item in schema]
+
+    client = build_s3_client(credentials)
+    if row_count == 0:
+        return {
+            "previewColumns": page_columns,
+            "previewRows": [],
+            "previewPage": preview_page,
+            "rowCount": row_count,
+        }
+
+    if file_type == "csv":
+        page_columns, page_rows = _paginate_converted_chunks(
+            _read_csv_chunks(client, credentials.bucket, object_key),
+            schema,
+            page=page,
+            page_size=page_size,
+        )
+    else:
+        temp_file, _ = _download_object_to_temp_file(client, credentials.bucket, object_key)
+        temp_path = Path(temp_file.name)
+        temp_file.close()
+        try:
+            df, _ = _load_local_excel_dataframe(temp_path, selected_sheet)
+        finally:
+            temp_path.unlink(missing_ok=True)
+
+        converted = convert_dataframe(df, schema)
+        page_columns, page_rows = _slice_dataframe_page(converted, page=page, page_size=page_size)
+
+    return {
+        "previewColumns": page_columns or preview_columns or [item["column"] for item in schema],
+        "previewRows": page_rows,
+        "previewPage": preview_page,
+        "rowCount": row_count,
+    }
+
+
 def process_local_file(
     file_path: str | Path,
     *,
@@ -335,6 +451,7 @@ def _process_csv(client, bucket: str, object_key: str, overrides: dict[str, str]
         "schema": schema,
         "previewColumns": preview_columns,
         "previewRows": preview_rows[:preview_row_limit],
+        "previewPage": _build_preview_page_metadata(row_count, page=1, page_size=preview_row_limit),
         "warnings": warnings,
     }
 
@@ -404,5 +521,6 @@ def _process_local_csv(file_path: Path, overrides: dict[str, str], preview_row_l
         "schema": schema,
         "previewColumns": preview_columns,
         "previewRows": preview_rows[:preview_row_limit],
+        "previewPage": _build_preview_page_metadata(row_count, page=1, page_size=preview_row_limit),
         "warnings": warnings,
     }

@@ -9,6 +9,7 @@ from django.test import SimpleTestCase
 from data_processing.services.processing import (
     CSV_CHUNK_SIZE,
     S3Credentials,
+    fetch_s3_preview_page,
     list_supported_files,
     process_local_file,
     process_s3_object,
@@ -103,6 +104,7 @@ class ProcessingServiceTests(SimpleTestCase):
         self.assertEqual(result["fileType"], "csv")
         self.assertEqual(result["rowCount"], 2)
         self.assertEqual(len(result["previewRows"]), 1)
+        self.assertEqual(result["previewPage"]["totalPages"], 2)
         self.assertEqual(result["processingMetadata"]["chunkSize"], CSV_CHUNK_SIZE)
         self.assertEqual(schema["Score"]["inferred_type"], "integer")
 
@@ -120,3 +122,58 @@ class ProcessingServiceTests(SimpleTestCase):
         self.assertEqual(len(result["previewRows"]), 2)
         self.assertEqual(result["previewColumns"], ["Name", "Score"])
 
+    def test_fetch_s3_preview_page_uses_stored_schema_for_requested_page(self) -> None:
+        fake_client = FakeS3Client(
+            objects={
+                "incoming/sample.csv": (
+                    b"Name,Score\n"
+                    b"Alice,90\n"
+                    b"Bob,85\n"
+                    b"Charlie,80\n"
+                    b"David,75\n"
+                )
+            }
+        )
+        schema = [
+            {
+                "column": "Name",
+                "inferred_type": "text",
+                "storage_type": "string",
+                "display_type": "Text",
+                "nullable": False,
+                "confidence": 0.45,
+                "warnings": [],
+                "null_token_count": 0,
+                "sample_values": ["Alice", "Bob"],
+                "allowed_overrides": ["text", "integer", "float", "boolean", "date", "datetime", "category", "complex"],
+            },
+            {
+                "column": "Score",
+                "inferred_type": "integer",
+                "storage_type": "Int64",
+                "display_type": "Integer",
+                "nullable": False,
+                "confidence": 0.98,
+                "warnings": [],
+                "null_token_count": 0,
+                "sample_values": ["90", "85"],
+                "allowed_overrides": ["text", "integer", "float", "boolean", "date", "datetime", "category", "complex"],
+            },
+        ]
+
+        with patch("data_processing.services.processing.build_s3_client", return_value=fake_client):
+            preview = fetch_s3_preview_page(
+                credentials=self.credentials,
+                object_key="incoming/sample.csv",
+                file_type="csv",
+                selected_sheet="",
+                schema=schema,
+                row_count=4,
+                page=2,
+                page_size=2,
+                preview_columns=["Name", "Score"],
+            )
+
+        self.assertEqual(preview["previewPage"]["page"], 2)
+        self.assertEqual(preview["previewPage"]["totalPages"], 2)
+        self.assertEqual(preview["previewRows"], [{"Name": "Charlie", "Score": 80}, {"Name": "David", "Score": 75}])

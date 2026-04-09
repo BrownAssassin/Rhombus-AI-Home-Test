@@ -1,6 +1,6 @@
 import { startTransition, useState, type JSX } from "react";
 
-import { fetchS3Files, processFile } from "./api";
+import { fetchPreviewPage, fetchS3Files, processFile } from "./api";
 import type { ColumnInferenceResult, ProcessResponse, S3CredentialsInput, S3File } from "./types";
 
 type ViewState = "connection" | "workbench";
@@ -71,19 +71,19 @@ export default function App() {
   const [overrides, setOverrides] = useState<Record<string, string>>({});
   const [rowsPerPage, setRowsPerPage] = useState<number>(25);
   const [currentPage, setCurrentPage] = useState<number>(1);
-  const [busyState, setBusyState] = useState<"idle" | "listing" | "processing">("idle");
+  const [busyState, setBusyState] = useState<"idle" | "listing" | "processing" | "paging">("idle");
   const [error, setError] = useState("");
 
   const selectedFile = files.find((item) => item.key === selectedKey) ?? null;
   const displayedSchema = detectedSchema.length > 0 ? detectedSchema : result?.schema ?? [];
   const previewRows = result?.previewRows ?? [];
-  const totalPreviewRows = previewRows.length;
-  const totalPages = Math.max(1, Math.ceil(totalPreviewRows / rowsPerPage));
-  const safeCurrentPage = Math.min(currentPage, totalPages);
-  const pageStart = totalPreviewRows === 0 ? 0 : (safeCurrentPage - 1) * rowsPerPage;
-  const paginatedPreviewRows = previewRows.slice(pageStart, pageStart + rowsPerPage);
+  const activePage = result?.previewPage.page ?? currentPage;
+  const activePageSize = result?.previewPage.pageSize ?? rowsPerPage;
+  const totalPreviewRows = result?.previewPage.totalRows ?? result?.rowCount ?? 0;
+  const totalPages = result?.previewPage.totalPages ?? Math.max(1, Math.ceil(totalPreviewRows / activePageSize));
+  const pageStart = totalPreviewRows === 0 ? 0 : (activePage - 1) * activePageSize;
   const previewRangeStart = totalPreviewRows === 0 ? 0 : pageStart + 1;
-  const previewRangeEnd = totalPreviewRows === 0 ? 0 : pageStart + paginatedPreviewRows.length;
+  const previewRangeEnd = totalPreviewRows === 0 ? 0 : pageStart + previewRows.length;
   const missingConnectionFields = [
     !credentials.access_key_id && "access key ID",
     !credentials.secret_access_key && "secret access key",
@@ -164,12 +164,13 @@ export default function App() {
         credentials,
         objectKey: selectedKey,
         sheetName,
-        previewRowLimit: 100,
+        previewRowLimit: rowsPerPage,
         overrides: effectiveOverrides,
       });
 
       setResult(nextResult);
-      setCurrentPage(1);
+      setCurrentPage(nextResult.previewPage.page);
+      setRowsPerPage(nextResult.previewPage.pageSize);
       if (baselineSchema.length === 0 || effectiveOverrides.length === 0) {
         setDetectedSchema(nextResult.schema);
         setOverrides(schemaToOverrides(nextResult.schema));
@@ -181,6 +182,42 @@ export default function App() {
       }
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "Unable to process file.");
+    } finally {
+      setBusyState("idle");
+    }
+  }
+
+  async function handleLoadPreviewPage(nextPage: number, nextPageSize: number = rowsPerPage) {
+    if (!result) {
+      return;
+    }
+
+    setBusyState("paging");
+    setError("");
+
+    try {
+      const preview = await fetchPreviewPage({
+        credentials,
+        runId: result.runId,
+        page: nextPage,
+        pageSize: nextPageSize,
+      });
+
+      setResult((current) =>
+        current
+          ? {
+              ...current,
+              rowCount: preview.rowCount,
+              previewColumns: preview.previewColumns,
+              previewRows: preview.previewRows,
+              previewPage: preview.previewPage,
+            }
+          : current,
+      );
+      setCurrentPage(preview.previewPage.page);
+      setRowsPerPage(preview.previewPage.pageSize);
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "Unable to load the requested preview page.");
     } finally {
       setBusyState("idle");
     }
@@ -209,17 +246,30 @@ export default function App() {
     }
   }
 
-  function handleRowsPerPageChange(value: number) {
-    setRowsPerPage(value);
-    setCurrentPage(1);
+  async function handleRowsPerPageChange(value: number) {
+    if (!result) {
+      setRowsPerPage(value);
+      setCurrentPage(1);
+      return;
+    }
+
+    await handleLoadPreviewPage(1, value);
   }
 
-  function goToNextPage() {
-    setCurrentPage((page) => Math.min(page + 1, totalPages));
+  async function goToNextPage() {
+    if (!result?.previewPage.hasNextPage) {
+      return;
+    }
+
+    await handleLoadPreviewPage(activePage + 1, activePageSize);
   }
 
-  function goToPreviousPage() {
-    setCurrentPage((page) => Math.max(page - 1, 1));
+  async function goToPreviousPage() {
+    if (!result?.previewPage.hasPreviousPage) {
+      return;
+    }
+
+    await handleLoadPreviewPage(activePage - 1, activePageSize);
   }
 
   return (
@@ -359,7 +409,10 @@ export default function App() {
                       <select
                         aria-label="Rows per page"
                         value={rowsPerPage}
-                        onChange={(event) => handleRowsPerPageChange(Number(event.target.value))}
+                        onChange={(event) => {
+                          void handleRowsPerPageChange(Number(event.target.value));
+                        }}
+                        disabled={busyState !== "idle"}
                       >
                         {PAGE_SIZE_OPTIONS.map((option) => (
                           <option key={option} value={option}>
@@ -394,19 +447,23 @@ export default function App() {
                         <button
                           className="secondary-button pagination-button"
                           aria-label="Previous page"
-                          onClick={goToPreviousPage}
-                          disabled={safeCurrentPage === 1 || totalPreviewRows === 0}
+                          onClick={() => {
+                            void goToPreviousPage();
+                          }}
+                          disabled={!result.previewPage.hasPreviousPage || busyState !== "idle"}
                         >
                           Previous
                         </button>
                         <span className="page-indicator">
-                          Page {safeCurrentPage} of {totalPages}
+                          Page {activePage} of {totalPages}
                         </span>
                         <button
                           className="secondary-button pagination-button"
                           aria-label="Next page"
-                          onClick={goToNextPage}
-                          disabled={safeCurrentPage === totalPages || totalPreviewRows === 0}
+                          onClick={() => {
+                            void goToNextPage();
+                          }}
+                          disabled={!result.previewPage.hasNextPage || busyState !== "idle"}
                         >
                           Next
                         </button>
@@ -423,10 +480,10 @@ export default function App() {
                           </tr>
                         </thead>
                         <tbody>
-                          {paginatedPreviewRows.map((row, index) => (
-                            <tr key={`row-${safeCurrentPage}-${index}`}>
+                          {previewRows.map((row, index) => (
+                            <tr key={`row-${activePage}-${index}`}>
                               {result.previewColumns.map((column) => (
-                                <td key={`${safeCurrentPage}-${index}-${column}`}>{String(row[column] ?? "")}</td>
+                                <td key={`${activePage}-${index}-${column}`}>{String(row[column] ?? "")}</td>
                               ))}
                             </tr>
                           ))}

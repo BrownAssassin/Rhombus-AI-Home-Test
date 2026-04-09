@@ -8,6 +8,7 @@ Single-host Django + React application for browsing CSV and Excel files in Amazo
 - Lists supported `.csv`, `.xls`, and `.xlsx` objects from a bucket or prefix.
 - Profiles columns with conservative inference rules for integers, floats, booleans, dates, datetimes, categories, and complex numbers.
 - Lets the user override inferred types before reprocessing.
+- Pages through the processed dataset from the backend so reviewers can inspect full files instead of a capped in-memory sample.
 - Stores sanitized processing metadata in Django without persisting AWS secrets.
 - Exposes a local CLI via `infer_data_types.py` for quick local-file smoke testing.
 
@@ -142,7 +143,7 @@ Request body:
 
 ### `POST /api/data/process`
 
-Processes the selected S3 object and returns schema metadata plus a preview.
+Processes the selected S3 object, stores the inferred schema, and returns the first preview page.
 
 Request body:
 
@@ -160,6 +161,33 @@ Request body:
   "overrides": [
     { "column": "Score", "target_type": "float" }
   ]
+}
+```
+
+Response highlights:
+
+- `runId`: stored processing run identifier used for later preview-page requests
+- `schema`: inferred or overridden schema metadata
+- `previewRows`: first processed page of rows
+- `previewPage`: page metadata including `page`, `pageSize`, `totalRows`, and `totalPages`
+
+### `POST /api/data/preview`
+
+Returns a specific processed page for an existing `ProcessingRun` using the stored schema from the earlier processing step.
+
+Request body:
+
+```json
+{
+  "access_key_id": "AKIA...",
+  "secret_access_key": "secret",
+  "session_token": "",
+  "region": "ap-southeast-2",
+  "bucket": "demo-bucket",
+  "prefix": "incoming/",
+  "run_id": 12,
+  "page": 3,
+  "page_size": 50
 }
 ```
 
@@ -245,5 +273,5 @@ Render automatically provides `PORT`, `RENDER_EXTERNAL_HOSTNAME`, and `RENDER_EX
 - AWS credentials are accepted at runtime and are intentionally not stored in the database.
 - CSV handling is chunked for profiling and preview generation; Excel handling is capped at 20 MB in this MVP.
 - Type inference is intentionally conservative. Ambiguous date columns stay as text unless the user overrides them.
-- The app currently returns a processed preview rather than exporting a full transformed file.
+- The app supports paginated preview browsing across the processed dataset, but it does not export a full transformed file in this MVP.
 - A Render deployment that keeps SQLite in the container filesystem is suitable for demos, but `ProcessingRun` history resets whenever the service is rebuilt or restarted.

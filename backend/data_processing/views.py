@@ -5,10 +5,15 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import ProcessingRun
-from .serializers import ListFilesRequestSerializer, ProcessFileRequestSerializer
+from .serializers import (
+    ListFilesRequestSerializer,
+    PreviewPageRequestSerializer,
+    ProcessFileRequestSerializer,
+)
 from .services.processing import (
     ProcessingServiceError,
     S3Credentials,
+    fetch_s3_preview_page,
     list_supported_files,
     process_s3_object,
 )
@@ -103,6 +108,7 @@ class ProcessDataView(APIView):
                 "schema": result["schema"],
                 "previewColumns": result["previewColumns"],
                 "previewRows": result["previewRows"],
+                "previewPage": result["previewPage"],
                 "warnings": result["warnings"],
                 "processingMetadata": result["processingMetadata"],
                 "selectedSheet": result["selectedSheet"],
@@ -110,3 +116,48 @@ class ProcessDataView(APIView):
             }
         )
 
+
+class PreviewPageView(APIView):
+    authentication_classes = []
+    permission_classes = []
+
+    def post(self, request):
+        serializer = PreviewPageRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        validated_data = serializer.validated_data
+        credentials = _build_credentials(validated_data)
+
+        run = ProcessingRun.objects.filter(pk=validated_data["run_id"], status="completed").first()
+        if run is None:
+            return Response(
+                {"detail": "The requested processing run could not be found.", "code": "run_not_found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        try:
+            preview = fetch_s3_preview_page(
+                credentials=credentials,
+                object_key=run.object_key,
+                file_type=run.file_type,
+                selected_sheet=run.sheet_name,
+                schema=run.schema,
+                row_count=run.row_count,
+                page=validated_data["page"],
+                page_size=validated_data["page_size"],
+                preview_columns=run.preview_columns,
+            )
+        except ProcessingServiceError as exc:
+            return Response(
+                {"detail": str(exc), "code": exc.code},
+                status=exc.status_code,
+            )
+
+        return Response(
+            {
+                "runId": run.id,
+                "rowCount": preview["rowCount"],
+                "previewColumns": preview["previewColumns"],
+                "previewRows": preview["previewRows"],
+                "previewPage": preview["previewPage"],
+            }
+        )

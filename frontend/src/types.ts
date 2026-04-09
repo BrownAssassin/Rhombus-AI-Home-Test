@@ -33,6 +33,14 @@ export type ProcessResponse = {
   schema: ColumnInferenceResult[];
   previewColumns: string[];
   previewRows: Record<string, unknown>[];
+  previewPage: {
+    page: number;
+    pageSize: number;
+    totalRows: number;
+    totalPages: number;
+    hasPreviousPage: boolean;
+    hasNextPage: boolean;
+  };
   warnings: string[];
   processingMetadata: {
     durationMs: number;
@@ -43,3 +51,17 @@ export type ProcessResponse = {
   fileType: "csv" | "excel";
 };
 
+export type PreviewPageResponse = {
+  runId: number;
+  rowCount: number;
+  previewColumns: string[];
+  previewRows: Record<string, unknown>[];
+  previewPage: {
+    page: number;
+    pageSize: number;
+    totalRows: number;
+    totalPages: number;
+    hasPreviousPage: boolean;
+    hasNextPage: boolean;
+  };
+};

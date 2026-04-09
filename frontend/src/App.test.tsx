@@ -16,13 +16,17 @@ function enterRequiredCredentials() {
 
 function buildProcessResponse(overrides?: Partial<{
   runId: number;
+  rowCount: number;
   schema: Array<Record<string, unknown>>;
   previewColumns: string[];
   previewRows: Array<Record<string, unknown>>;
+  previewPage: Record<string, unknown>;
 }>) {
+  const previewRows = overrides?.previewRows ?? [{ Score: 90 }, { Score: 75 }];
+  const rowCount = overrides?.rowCount ?? previewRows.length;
   return {
     runId: overrides?.runId ?? 1,
-    rowCount: 5,
+    rowCount,
     schema: overrides?.schema ?? [
       {
         column: "Score",
@@ -38,7 +42,15 @@ function buildProcessResponse(overrides?: Partial<{
       },
     ],
     previewColumns: overrides?.previewColumns ?? ["Score"],
-    previewRows: overrides?.previewRows ?? [{ Score: 90 }, { Score: 75 }],
+    previewRows,
+    previewPage: overrides?.previewPage ?? {
+      page: 1,
+      pageSize: 25,
+      totalRows: rowCount,
+      totalPages: Math.max(1, Math.ceil(rowCount / 25)),
+      hasPreviousPage: false,
+      hasNextPage: rowCount > 25,
+    },
     warnings: [],
     processingMetadata: { durationMs: 11.2, previewRowLimit: 100, chunkSize: 5000 },
     selectedSheet: "",
@@ -167,8 +179,10 @@ describe("App", () => {
   });
 
   it("paginates preview rows on the client and resets paging on reprocess and page size change", async () => {
-    const previewRows = Array.from({ length: 30 }, (_, index) => ({ Index: index + 1 }));
-    const processResponse = buildProcessResponse({
+    const firstPageRows = Array.from({ length: 25 }, (_, index) => ({ Index: index + 1 }));
+    const secondPageRows = Array.from({ length: 5 }, (_, index) => ({ Index: index + 26 }));
+    const firstPageResponse = buildProcessResponse({
+      rowCount: 30,
       schema: [
         {
           column: "Index",
@@ -184,8 +198,44 @@ describe("App", () => {
         },
       ],
       previewColumns: ["Index"],
-      previewRows,
+      previewRows: firstPageRows,
+      previewPage: {
+        page: 1,
+        pageSize: 25,
+        totalRows: 30,
+        totalPages: 2,
+        hasPreviousPage: false,
+        hasNextPage: true,
+      },
     });
+    const secondPageResponse = {
+      runId: 1,
+      rowCount: 30,
+      previewColumns: ["Index"],
+      previewRows: secondPageRows,
+      previewPage: {
+        page: 2,
+        pageSize: 25,
+        totalRows: 30,
+        totalPages: 2,
+        hasPreviousPage: true,
+        hasNextPage: false,
+      },
+    };
+    const resizedFirstPageResponse = {
+      runId: 1,
+      rowCount: 30,
+      previewColumns: ["Index"],
+      previewRows: Array.from({ length: 30 }, (_, index) => ({ Index: index + 1 })),
+      previewPage: {
+        page: 1,
+        pageSize: 50,
+        totalRows: 30,
+        totalPages: 1,
+        hasPreviousPage: false,
+        hasNextPage: false,
+      },
+    };
 
     vi.stubGlobal(
       "fetch",
@@ -199,11 +249,31 @@ describe("App", () => {
         })
         .mockResolvedValueOnce({
           ok: true,
-          json: async () => processResponse,
+          json: async () => firstPageResponse,
         })
         .mockResolvedValueOnce({
           ok: true,
-          json: async () => ({ ...processResponse, runId: 2 }),
+          json: async () => secondPageResponse,
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => firstPageResponse,
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => secondPageResponse,
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => { return { ...firstPageResponse, runId: 2 }; },
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ ...secondPageResponse, runId: 2 }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => resizedFirstPageResponse,
         }),
     );
 
@@ -219,24 +289,24 @@ describe("App", () => {
     expect(screen.queryByRole("cell", { name: "26" })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /Next page/i }));
-    expect(screen.getByText(/Preview rows 26-30 of 30/i)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText(/Preview rows 26-30 of 30/i)).toBeInTheDocument());
     expect(screen.getByRole("cell", { name: "26" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /Previous page/i }));
-    expect(screen.getByText(/Preview rows 1-25 of 30/i)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText(/Preview rows 1-25 of 30/i)).toBeInTheDocument());
 
     fireEvent.click(screen.getByRole("button", { name: /Next page/i }));
-    expect(screen.getByText(/Page 2 of 2/i)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText(/Page 2 of 2/i)).toBeInTheDocument());
 
     fireEvent.click(screen.getByRole("button", { name: /Reprocess with overrides/i }));
     await waitFor(() => expect(screen.getByText(/Preview rows 1-25 of 30/i)).toBeInTheDocument());
     expect(screen.getByText(/Page 1 of 2/i)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /Next page/i }));
-    expect(screen.getByText(/Preview rows 26-30 of 30/i)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText(/Preview rows 26-30 of 30/i)).toBeInTheDocument());
 
     fireEvent.change(screen.getByLabelText(/Rows per page/i), { target: { value: "50" } });
-    expect(screen.getByText(/Preview rows 1-30 of 30/i)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText(/Preview rows 1-30 of 30/i)).toBeInTheDocument());
     expect(screen.getByText(/Page 1 of 1/i)).toBeInTheDocument();
   });
 

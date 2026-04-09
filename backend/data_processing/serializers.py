@@ -42,3 +42,8 @@ class ProcessFileRequestSerializer(S3CredentialsSerializer):
     preview_row_limit = serializers.IntegerField(required=False, min_value=1, max_value=500, default=100)
     overrides = ColumnOverrideSerializer(many=True, required=False)
 
+
+class PreviewPageRequestSerializer(S3CredentialsSerializer):
+    run_id = serializers.IntegerField(min_value=1)
+    page = serializers.IntegerField(required=False, min_value=1, default=1)
+    page_size = serializers.IntegerField(required=False, min_value=1, max_value=500, default=100)

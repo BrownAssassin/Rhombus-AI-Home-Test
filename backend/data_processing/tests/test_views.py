@@ -61,6 +61,14 @@ class DataProcessingApiTests(TestCase):
             ],
             "previewColumns": ["Score"],
             "previewRows": [{"Score": 90}, {"Score": 75}],
+            "previewPage": {
+                "page": 1,
+                "pageSize": 100,
+                "totalRows": 2,
+                "totalPages": 1,
+                "hasPreviousPage": False,
+                "hasNextPage": False,
+            },
             "warnings": [],
             "processingMetadata": {"durationMs": 12.4, "previewRowLimit": 100, "chunkSize": 5000},
         }
@@ -81,6 +89,7 @@ class DataProcessingApiTests(TestCase):
         self.assertEqual(run.bucket, "demo-bucket")
         self.assertEqual(run.object_key, "incoming/sample.csv")
         self.assertEqual(run.processing_metadata["durationMs"], 12.4)
+        self.assertEqual(response.json()["previewPage"]["totalRows"], 2)
         self.assertNotIn("access_key_id", response.json())
         self.assertNotIn("secret_access_key", response.json())
 
@@ -118,3 +127,73 @@ class DataProcessingApiTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["code"], "invalid_override")
 
+    def test_preview_endpoint_returns_paginated_rows_for_existing_run(self) -> None:
+        run = ProcessingRun.objects.create(
+            bucket="demo-bucket",
+            object_key="incoming/sample.csv",
+            file_type="csv",
+            sheet_name="",
+            status="completed",
+            row_count=4,
+            schema=[
+                {
+                    "column": "Score",
+                    "inferred_type": "integer",
+                    "storage_type": "Int64",
+                    "display_type": "Integer",
+                    "nullable": True,
+                    "confidence": 0.98,
+                    "warnings": [],
+                    "null_token_count": 0,
+                    "sample_values": ["90", "75"],
+                    "allowed_overrides": ["text", "integer", "float", "boolean", "date", "datetime", "category", "complex"],
+                }
+            ],
+            warnings=[],
+            preview_columns=["Score"],
+            processing_metadata={"durationMs": 12.4, "previewRowLimit": 100, "chunkSize": 5000},
+        )
+
+        payload = {
+            **self.credentials_payload,
+            "run_id": run.id,
+            "page": 2,
+            "page_size": 2,
+        }
+
+        with patch(
+            "data_processing.views.fetch_s3_preview_page",
+            return_value={
+                "rowCount": 4,
+                "previewColumns": ["Score"],
+                "previewRows": [{"Score": 85}, {"Score": 80}],
+                "previewPage": {
+                    "page": 2,
+                    "pageSize": 2,
+                    "totalRows": 4,
+                    "totalPages": 2,
+                    "hasPreviousPage": True,
+                    "hasNextPage": False,
+                },
+            },
+        ) as mocked_preview:
+            response = self.client.post("/api/data/preview", payload, format="json")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["runId"], run.id)
+        self.assertEqual(response.json()["previewPage"]["page"], 2)
+        self.assertEqual(response.json()["previewRows"], [{"Score": 85}, {"Score": 80}])
+        self.assertEqual(mocked_preview.call_args.kwargs["row_count"], 4)
+
+    def test_preview_endpoint_returns_not_found_for_missing_run(self) -> None:
+        payload = {
+            **self.credentials_payload,
+            "run_id": 999,
+            "page": 1,
+            "page_size": 25,
+        }
+
+        response = self.client.post("/api/data/preview", payload, format="json")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["code"], "run_not_found")
