@@ -260,4 +260,38 @@ describe("App", () => {
     expect(screen.getByText(/No supported files were found for this bucket or prefix/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Process selection/i })).toBeDisabled();
   });
+
+  it("allows the files and schema drawer to be collapsed without losing the preview", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            files: [{ key: "sample.csv", size: 147, lastModified: "2026-04-03T00:00:00Z", format: "csv" }],
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => buildProcessResponse(),
+        }),
+    );
+
+    render(<App />);
+
+    enterRequiredCredentials();
+    fireEvent.click(screen.getByRole("button", { name: /Browse files/i }));
+    await waitFor(() => expect(screen.getByText("Processing workbench")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /Process selection/i }));
+    await waitFor(() => expect(screen.getByText(/Preview rows 1-2 of 2/i)).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /Hide files & schema/i }));
+    expect(screen.queryByText("Supported files")).not.toBeInTheDocument();
+    expect(screen.getByText("Processed preview")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Open files & schema/i }));
+    expect(screen.getByText("Supported files")).toBeInTheDocument();
+  });
 });

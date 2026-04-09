@@ -61,6 +61,7 @@ function formatColumnWarnings(schema: ColumnInferenceResult[]): JSX.Element | nu
 
 export default function App() {
   const [view, setView] = useState<ViewState>("connection");
+  const [isWorkbenchSidebarOpen, setIsWorkbenchSidebarOpen] = useState(false);
   const [credentials, setCredentials] = useState<S3CredentialsInput>(defaultCredentials);
   const [files, setFiles] = useState<S3File[]>([]);
   const [selectedKey, setSelectedKey] = useState("");
@@ -131,6 +132,7 @@ export default function App() {
         setSelectedKey("");
         setSheetName("");
       }
+      setIsWorkbenchSidebarOpen(true);
       setView("workbench");
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "Unable to load files.");
@@ -200,6 +202,7 @@ export default function App() {
   }
 
   function handleEditConnection() {
+    setIsWorkbenchSidebarOpen(false);
     setView("connection");
     if (error) {
       setError("");
@@ -326,165 +329,23 @@ export default function App() {
                 <span>{files.length} supported files</span>
                 <span>{selectedFile?.key ?? "No file selected"}</span>
               </div>
-              <button className="secondary-button" onClick={handleEditConnection}>
-                Edit connection
-              </button>
+              <div className="workbench-header-buttons">
+                <button
+                  className="secondary-button"
+                  onClick={() => setIsWorkbenchSidebarOpen((open) => !open)}
+                >
+                  {isWorkbenchSidebarOpen ? "Hide files & schema" : "Open files & schema"}
+                </button>
+                <button className="secondary-button" onClick={handleEditConnection}>
+                  Edit connection
+                </button>
+              </div>
             </div>
           </section>
 
           {error ? <div className="callout danger">{error}</div> : null}
 
-          <section className="workbench-layout">
-            <aside className="workbench-sidebar">
-              <article className="card">
-                <div className="card-header">
-                  <div>
-                    <p className="section-label">Step 2</p>
-                    <h2>Supported files</h2>
-                  </div>
-                  <button
-                    className="primary-button"
-                    onClick={handleProcessFile}
-                    disabled={!selectedKey || busyState !== "idle"}
-                  >
-                    {busyState === "processing" ? "Processing..." : "Process selection"}
-                  </button>
-                </div>
-
-                <div className="metrics-row">
-                  <div className="metric">
-                    <span className="metric-label">Supported objects</span>
-                    <strong>{files.length}</strong>
-                  </div>
-                  <div className="metric">
-                    <span className="metric-label">Selected file</span>
-                    <strong>{selectedFile?.key ?? "None"}</strong>
-                  </div>
-                </div>
-
-                {files.length === 0 ? (
-                  <div className="empty-state">
-                    <p>No supported files were found for this bucket or prefix.</p>
-                  </div>
-                ) : (
-                  <div className="file-list">
-                    {files.map((file) => (
-                      <button
-                        key={file.key}
-                        className={`file-item ${file.key === selectedKey ? "selected" : ""}`}
-                        onClick={() => handleSelectFile(file)}
-                      >
-                        <span>{file.key}</span>
-                        <span>{file.format.toUpperCase()} - {formatBytes(file.size)}</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-
-                {selectedFile?.format === "excel" ? (
-                  <label>
-                    Optional sheet name
-                    <input
-                      value={sheetName}
-                      onChange={(event) => setSheetName(event.target.value)}
-                      placeholder="First sheet if blank"
-                    />
-                  </label>
-                ) : null}
-              </article>
-
-              <article className="card schema-card">
-                <div className="card-header compact">
-                  <div>
-                    <p className="section-label">Step 3</p>
-                    <h2>Inferred schema</h2>
-                  </div>
-                  <button
-                    className="secondary-button"
-                    onClick={applySchemaDefaults}
-                    disabled={busyState !== "idle" || displayedSchema.length === 0}
-                  >
-                    Reset overrides
-                  </button>
-                </div>
-
-                {result ? (
-                  <>
-                    <div className="metrics-row">
-                      <div className="metric">
-                        <span className="metric-label">Rows profiled</span>
-                        <strong>{result.rowCount.toLocaleString()}</strong>
-                      </div>
-                      <div className="metric">
-                        <span className="metric-label">Processed in</span>
-                        <strong>{result.processingMetadata.durationMs} ms</strong>
-                      </div>
-                      <div className="metric">
-                        <span className="metric-label">Run ID</span>
-                        <strong>{result.runId}</strong>
-                      </div>
-                      <div className="metric">
-                        <span className="metric-label">Changed overrides</span>
-                        <strong>{changedOverrideCount}</strong>
-                      </div>
-                    </div>
-
-                    <div className="table-wrap schema-table-wrap">
-                      <table>
-                        <thead>
-                          <tr>
-                            <th>Column</th>
-                            <th>Detected</th>
-                            <th>Override</th>
-                            <th>Confidence</th>
-                            <th>Samples</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {displayedSchema.map((column) => (
-                            <tr key={column.column}>
-                              <td>{column.column}</td>
-                              <td>{column.display_type}</td>
-                              <td>
-                                <select
-                                  aria-label={`Override type for ${column.column}`}
-                                  value={overrides[column.column] ?? column.inferred_type}
-                                  onChange={(event) =>
-                                    setOverrides((current) => ({
-                                      ...current,
-                                      [column.column]: event.target.value,
-                                    }))
-                                  }
-                                >
-                                  {column.allowed_overrides.map((option) => (
-                                    <option key={option} value={option}>
-                                      {typeLabelOverrides[option] ?? option}
-                                    </option>
-                                  ))}
-                                </select>
-                              </td>
-                              <td>{Math.round(column.confidence * 100)}%</td>
-                              <td>{column.sample_values.join(", ") || "No non-null sample"}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-
-                    <div className="toolbar">
-                      <button className="secondary-button" onClick={handleProcessFile} disabled={busyState !== "idle"}>
-                        Reprocess with overrides
-                      </button>
-                    </div>
-                  </>
-                ) : (
-                  <div className="empty-state">
-                    <p>Process the selected file to infer its schema and manage column overrides.</p>
-                  </div>
-                )}
-              </article>
-            </aside>
-
+          <section className="workbench-stage">
             <section className="workbench-main">
               <article className="card preview-card">
                 <div className="card-header compact">
@@ -584,6 +445,184 @@ export default function App() {
                 )}
               </article>
             </section>
+
+            {isWorkbenchSidebarOpen ? (
+              <>
+                <button
+                  className="workbench-drawer-backdrop"
+                  aria-label="Close files and schema panel"
+                  onClick={() => setIsWorkbenchSidebarOpen(false)}
+                />
+                <aside className="workbench-drawer" aria-label="Files and schema panel">
+                  <div className="drawer-header">
+                    <div>
+                      <p className="eyebrow">Workbench controls</p>
+                      <h2>Files and schema</h2>
+                    </div>
+                    <button
+                      className="secondary-button drawer-close-button"
+                      onClick={() => setIsWorkbenchSidebarOpen(false)}
+                    >
+                      Close panel
+                    </button>
+                  </div>
+
+                  <div className="drawer-grid">
+                    <article className="card drawer-card">
+                      <div className="card-header stacked">
+                        <div>
+                          <p className="section-label">Step 2</p>
+                          <h2>Supported files</h2>
+                        </div>
+                        <div className="card-actions">
+                          <button
+                            className="primary-button"
+                            onClick={handleProcessFile}
+                            disabled={!selectedKey || busyState !== "idle"}
+                          >
+                            {busyState === "processing" ? "Processing..." : "Process selection"}
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="metrics-row">
+                        <div className="metric">
+                          <span className="metric-label">Supported objects</span>
+                          <strong>{files.length}</strong>
+                        </div>
+                        <div className="metric">
+                          <span className="metric-label">Selected file</span>
+                          <strong>{selectedFile?.key ?? "None"}</strong>
+                        </div>
+                      </div>
+
+                      {files.length === 0 ? (
+                        <div className="empty-state">
+                          <p>No supported files were found for this bucket or prefix.</p>
+                        </div>
+                      ) : (
+                        <div className="file-list">
+                          {files.map((file) => (
+                            <button
+                              key={file.key}
+                              className={`file-item ${file.key === selectedKey ? "selected" : ""}`}
+                              onClick={() => handleSelectFile(file)}
+                            >
+                              <span>{file.key}</span>
+                              <span>{file.format.toUpperCase()} - {formatBytes(file.size)}</span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+
+                      {selectedFile?.format === "excel" ? (
+                        <label>
+                          Optional sheet name
+                          <input
+                            value={sheetName}
+                            onChange={(event) => setSheetName(event.target.value)}
+                            placeholder="First sheet if blank"
+                          />
+                        </label>
+                      ) : null}
+                    </article>
+
+                    <article className="card drawer-card schema-card">
+                      <div className="card-header stacked compact">
+                        <div>
+                          <p className="section-label">Step 3</p>
+                          <h2>Inferred schema</h2>
+                        </div>
+                        <div className="card-actions">
+                          <button
+                            className="secondary-button"
+                            onClick={applySchemaDefaults}
+                            disabled={busyState !== "idle" || displayedSchema.length === 0}
+                          >
+                            Reset overrides
+                          </button>
+                        </div>
+                      </div>
+
+                      {result ? (
+                        <>
+                          <div className="metrics-row">
+                            <div className="metric">
+                              <span className="metric-label">Rows profiled</span>
+                              <strong>{result.rowCount.toLocaleString()}</strong>
+                            </div>
+                            <div className="metric">
+                              <span className="metric-label">Processed in</span>
+                              <strong>{result.processingMetadata.durationMs} ms</strong>
+                            </div>
+                            <div className="metric">
+                              <span className="metric-label">Run ID</span>
+                              <strong>{result.runId}</strong>
+                            </div>
+                            <div className="metric">
+                              <span className="metric-label">Changed overrides</span>
+                              <strong>{changedOverrideCount}</strong>
+                            </div>
+                          </div>
+
+                          <div className="table-wrap schema-table-wrap">
+                            <table>
+                              <thead>
+                                <tr>
+                                  <th>Column</th>
+                                  <th>Detected</th>
+                                  <th>Override</th>
+                                  <th>Confidence</th>
+                                  <th>Samples</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {displayedSchema.map((column) => (
+                                  <tr key={column.column}>
+                                    <td>{column.column}</td>
+                                    <td>{column.display_type}</td>
+                                    <td>
+                                      <select
+                                        aria-label={`Override type for ${column.column}`}
+                                        value={overrides[column.column] ?? column.inferred_type}
+                                        onChange={(event) =>
+                                          setOverrides((current) => ({
+                                            ...current,
+                                            [column.column]: event.target.value,
+                                          }))
+                                        }
+                                      >
+                                        {column.allowed_overrides.map((option) => (
+                                          <option key={option} value={option}>
+                                            {typeLabelOverrides[option] ?? option}
+                                          </option>
+                                        ))}
+                                      </select>
+                                    </td>
+                                    <td>{Math.round(column.confidence * 100)}%</td>
+                                    <td>{column.sample_values.join(", ") || "No non-null sample"}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+
+                          <div className="toolbar">
+                            <button className="secondary-button" onClick={handleProcessFile} disabled={busyState !== "idle"}>
+                              Reprocess with overrides
+                            </button>
+                          </div>
+                        </>
+                      ) : (
+                        <div className="empty-state">
+                          <p>Process the selected file to infer its schema and manage column overrides.</p>
+                        </div>
+                      )}
+                    </article>
+                  </div>
+                </aside>
+              </>
+            ) : null}
           </section>
         </>
       )}

@@ -42,7 +42,7 @@ button {
 }
 
 .page-shell {
-  width: min(1200px, calc(100vw - 2rem));
+  width: min(1400px, calc(100vw - 2rem));
   margin: 0 auto;
   padding: 2rem 0 4rem;
 }
@@ -90,10 +90,6 @@ button {
   margin-top: 1.25rem;
 }
 
-.connection-layout {
-  max-width: 860px;
-}
-
 .workbench-header {
   display: flex;
   justify-content: space-between;
@@ -113,6 +109,13 @@ button {
   justify-items: end;
 }
 
+.workbench-header-buttons {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .workbench-summary {
   display: flex;
   flex-wrap: wrap;
@@ -129,22 +132,63 @@ button {
   font-size: 0.88rem;
 }
 
-.workbench-layout {
-  display: grid;
-  grid-template-columns: minmax(320px, 380px) minmax(0, 1fr);
-  gap: 1.25rem;
+.workbench-stage {
+  position: relative;
   margin-top: 1.25rem;
-  align-items: start;
-}
-
-.workbench-sidebar {
-  display: grid;
-  gap: 1.25rem;
-  align-content: start;
 }
 
 .workbench-main {
   min-width: 0;
+}
+
+.workbench-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 25;
+  border: none;
+  padding: 0;
+  background: rgba(4, 6, 10, 0.5);
+  backdrop-filter: blur(6px);
+}
+
+.workbench-drawer {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  width: 100vw;
+  height: 100vh;
+  padding: 1.5rem;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 1.5rem;
+  background: rgba(14, 17, 24, 0.94);
+  backdrop-filter: blur(18px);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+.drawer-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: flex-start;
+}
+
+.drawer-header h2 {
+  margin: 0;
+  font-size: 1.5rem;
+}
+
+.drawer-close-button {
+  min-width: 0;
+  padding-inline: 1rem;
+}
+
+.drawer-grid {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(22rem, 0.9fr) minmax(28rem, 1.1fr);
+  gap: 1.25rem;
+  align-items: stretch;
 }
 
 .card {
@@ -175,6 +219,27 @@ button {
 
 .card-header.compact h2 {
   font-size: 1.45rem;
+}
+
+.card-header.stacked {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.card-actions {
+  display: flex;
+  width: 100%;
+}
+
+.drawer-card .card-actions .primary-button,
+.drawer-card .card-actions .secondary-button,
+.drawer-card .toolbar .secondary-button {
+  width: 100%;
+  min-width: 0;
+}
+
+.drawer-card {
+  min-height: 0;
 }
 
 .field-grid {
@@ -380,8 +445,17 @@ input::placeholder {
   overflow: auto;
 }
 
+.drawer-card .file-list {
+  max-height: min(56vh, 42rem);
+}
+
+.drawer-card .schema-table-wrap {
+  max-height: min(60vh, 46rem);
+}
+
 .preview-table-wrap {
-  max-height: 42rem;
+  min-height: 34rem;
+  max-height: min(72vh, 58rem);
   overflow: auto;
 }
 
@@ -391,6 +465,7 @@ input::placeholder {
 
 .preview-card {
   gap: 1.1rem;
+  min-height: min(78vh, 62rem);
 }
 
 .pagination-select {
@@ -463,11 +538,15 @@ tbody tr:nth-child(odd) {
     justify-items: stretch;
   }
 
+  .workbench-header-buttons {
+    justify-content: stretch;
+  }
+
   .workbench-summary {
     justify-content: flex-start;
   }
 
-  .workbench-layout {
+  .drawer-grid {
     grid-template-columns: 1fr;
   }
 }
@@ -484,9 +563,22 @@ tbody tr:nth-child(odd) {
     padding: 1.15rem;
   }
 
+  .workbench-drawer {
+    padding: 1rem;
+  }
+
   .card-header {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .workbench-header-buttons,
+  .card-actions {
+    width: 100%;
+  }
+
+  .workbench-header-buttons {
+    flex-direction: column;
   }
 
   .primary-button,
@@ -506,6 +598,11 @@ tbody tr:nth-child(odd) {
 
   .workbench-summary span {
     max-width: none;
+  }
+
+  .drawer-header {
+    flex-direction: column;
+    align-items: stretch;
   }
 
   .pagination-bar,
