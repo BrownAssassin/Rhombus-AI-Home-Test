@@ -175,28 +175,31 @@ def update_profiles_from_dataframe(profiles: dict[str, ColumnProfile], df: pd.Da
             if len(profile.unique_values) < 51:
                 profile.unique_values.add(normalized)
 
-            decimal_value = parse_decimal(normalized)
-            if decimal_value is None:
-                profile.integer_valid = False
-                profile.float_valid = False
-            elif decimal_value != decimal_value.to_integral_value():
-                profile.integer_valid = False
+            if profile.integer_valid or profile.float_valid:
+                decimal_value = parse_decimal(normalized)
+                if decimal_value is None:
+                    profile.integer_valid = False
+                    profile.float_valid = False
+                elif profile.integer_valid and decimal_value != decimal_value.to_integral_value():
+                    profile.integer_valid = False
 
-            bool_value = parse_bool_token(normalized)
-            if bool_value is None:
-                profile.boolean_valid = False
-            elif not normalized.isdigit():
-                profile.boolean_has_alpha_tokens = True
+            if profile.boolean_valid:
+                bool_value = parse_bool_token(normalized)
+                if bool_value is None:
+                    profile.boolean_valid = False
+                elif not normalized.isdigit():
+                    profile.boolean_has_alpha_tokens = True
 
-            datetime_valid, ambiguous, has_time = parse_datetime_candidate(normalized)
-            if not datetime_valid:
-                profile.datetime_valid = False
-            if ambiguous:
-                profile.ambiguous_datetime = True
-            if has_time:
-                profile.has_time_component = True
+            if profile.datetime_valid:
+                datetime_valid, ambiguous, has_time = parse_datetime_candidate(normalized)
+                if not datetime_valid:
+                    profile.datetime_valid = False
+                if ambiguous:
+                    profile.ambiguous_datetime = True
+                if has_time:
+                    profile.has_time_component = True
 
-            if not parse_complex_candidate(normalized):
+            if profile.complex_valid and not parse_complex_candidate(normalized):
                 profile.complex_valid = False
 
 

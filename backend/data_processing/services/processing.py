@@ -178,6 +178,23 @@ def _convert_preview_slice(
     return dataframe_preview(converted_preview, len(converted_preview))
 
 
+def _capture_preview_frame(
+    preview_frames: list[pd.DataFrame],
+    chunk: pd.DataFrame,
+    *,
+    collected_rows: int,
+    preview_row_limit: int,
+) -> int:
+    if collected_rows >= preview_row_limit or chunk.empty:
+        return collected_rows
+
+    remaining = preview_row_limit - collected_rows
+    # Keep only the raw rows needed for the first preview page so we can apply
+    # the finalized schema without paying for a second CSV download and parse.
+    preview_frames.append(chunk.iloc[:remaining].copy())
+    return collected_rows + min(len(chunk), remaining)
+
+
 def _paginate_converted_chunks(
     chunks: Iterator[pd.DataFrame],
     schema: list[dict[str, Any]],
@@ -468,26 +485,26 @@ def _process_csv(client, bucket: str, object_key: str, overrides: dict[str, str]
     columns = _fetch_csv_columns(client, bucket, object_key)
     profiles = create_profiles(columns)
     row_count = 0
+    preview_frames: list[pd.DataFrame] = []
+    collected_preview_rows = 0
 
     for chunk in _read_csv_chunks(client, bucket, object_key):
         row_count += len(chunk)
         update_profiles_from_dataframe(profiles, chunk)
+        collected_preview_rows = _capture_preview_frame(
+            preview_frames,
+            chunk,
+            collected_rows=collected_preview_rows,
+            preview_row_limit=preview_row_limit,
+        )
 
     schema, warnings = build_schema_from_profiles(profiles, overrides)
 
     preview_rows: list[dict[str, Any]] = []
     preview_columns: list[str] = columns
-    if row_count > 0:
-        # The second streaming pass keeps memory bounded while still returning
-        # preview rows after inference and conversions have been finalized.
-        for chunk in _read_csv_chunks(client, bucket, object_key):
-            remaining = max(preview_row_limit - len(preview_rows), 0)
-            if remaining == 0:
-                break
-            preview_columns, chunk_rows = _convert_preview_slice(chunk, schema, limit=remaining)
-            preview_rows.extend(chunk_rows)
-            if len(preview_rows) >= preview_row_limit:
-                break
+    if preview_frames:
+        preview_source = pd.concat(preview_frames, ignore_index=True)
+        preview_columns, preview_rows = _convert_preview_slice(preview_source, schema, limit=preview_row_limit)
 
     return {
         "bucket": bucket,
@@ -541,26 +558,26 @@ def _process_local_csv(file_path: Path, overrides: dict[str, str], preview_row_l
     columns = _fetch_local_csv_columns(file_path)
     profiles = create_profiles(columns)
     row_count = 0
+    preview_frames: list[pd.DataFrame] = []
+    collected_preview_rows = 0
 
     for chunk in _read_local_csv_chunks(file_path):
         row_count += len(chunk)
         update_profiles_from_dataframe(profiles, chunk)
+        collected_preview_rows = _capture_preview_frame(
+            preview_frames,
+            chunk,
+            collected_rows=collected_preview_rows,
+            preview_row_limit=preview_row_limit,
+        )
 
     schema, warnings = build_schema_from_profiles(profiles, overrides)
 
     preview_rows: list[dict[str, Any]] = []
     preview_columns: list[str] = columns
-    if row_count > 0:
-        # Mirror the S3 flow locally so preview output matches the chunked
-        # inference behavior users see through the web application.
-        for chunk in _read_local_csv_chunks(file_path):
-            remaining = max(preview_row_limit - len(preview_rows), 0)
-            if remaining == 0:
-                break
-            preview_columns, chunk_rows = _convert_preview_slice(chunk, schema, limit=remaining)
-            preview_rows.extend(chunk_rows)
-            if len(preview_rows) >= preview_row_limit:
-                break
+    if preview_frames:
+        preview_source = pd.concat(preview_frames, ignore_index=True)
+        preview_columns, preview_rows = _convert_preview_slice(preview_source, schema, limit=preview_row_limit)
 
     return {
         "objectKey": str(file_path),
