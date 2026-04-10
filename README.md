@@ -166,14 +166,16 @@ Request body:
 
 Response highlights:
 
-- `runId`: stored processing run identifier used for later preview-page requests
+- `runId`: stored processing run identifier used for later preview-page requests and display
 - `schema`: inferred or overridden schema metadata
 - `previewRows`: first processed page of rows
 - `previewPage`: page metadata including `page`, `pageSize`, `totalRows`, and `totalPages`
 
 ### `POST /api/data/preview`
 
-Returns a specific processed page for an existing `ProcessingRun` using the stored schema from the earlier processing step.
+Returns a specific processed page using the current schema and file context. The API will reuse the stored `ProcessingRun`
+when it is available, but the request can also supply the preview context directly so paging still works in stateless or
+ephemeral deployment environments.
 
 Request body:
 
@@ -186,6 +188,25 @@ Request body:
   "bucket": "demo-bucket",
   "prefix": "incoming/",
   "run_id": 12,
+  "object_key": "incoming/sample.csv",
+  "file_type": "csv",
+  "selected_sheet": "",
+  "row_count": 14941,
+  "schema": [
+    {
+      "column": "Score",
+      "inferred_type": "float",
+      "storage_type": "Float64",
+      "display_type": "Float",
+      "nullable": true,
+      "confidence": 0.97,
+      "warnings": [],
+      "null_token_count": 0,
+      "sample_values": ["90", "75"],
+      "allowed_overrides": ["text", "integer", "float", "boolean", "date", "datetime", "category", "complex"]
+    }
+  ],
+  "preview_columns": ["Score"],
   "page": 3,
   "page_size": 50
 }

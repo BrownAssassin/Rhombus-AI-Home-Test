@@ -237,45 +237,46 @@ describe("App", () => {
       },
     };
 
-    vi.stubGlobal(
-      "fetch",
-      vi
-        .fn()
-        .mockResolvedValueOnce({
-          ok: true,
-          json: async () => ({
-            files: [{ key: "sample.csv", size: 147, lastModified: "2026-04-03T00:00:00Z", format: "csv" }],
-          }),
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          json: async () => firstPageResponse,
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          json: async () => secondPageResponse,
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          json: async () => firstPageResponse,
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          json: async () => secondPageResponse,
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          json: async () => { return { ...firstPageResponse, runId: 2 }; },
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          json: async () => ({ ...secondPageResponse, runId: 2 }),
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          json: async () => resizedFirstPageResponse,
+    const fetchMock = vi.fn();
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          files: [{ key: "sample.csv", size: 147, lastModified: "2026-04-03T00:00:00Z", format: "csv" }],
         }),
-    );
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => firstPageResponse,
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => secondPageResponse,
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => firstPageResponse,
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => secondPageResponse,
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => {
+          return { ...firstPageResponse, runId: 2 };
+        },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ ...secondPageResponse, runId: 2 }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => resizedFirstPageResponse,
+      });
+
+    vi.stubGlobal("fetch", fetchMock);
 
     render(<App />);
 
@@ -291,6 +292,13 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: /Next page/i }));
     await waitFor(() => expect(screen.getByText(/Preview rows 26-30 of 30/i)).toBeInTheDocument());
     expect(screen.getByRole("cell", { name: "26" })).toBeInTheDocument();
+    expect(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body))).toMatchObject({
+      run_id: 1,
+      object_key: "sample.csv",
+      file_type: "csv",
+      row_count: 30,
+      preview_columns: ["Index"],
+    });
 
     fireEvent.click(screen.getByRole("button", { name: /Previous page/i }));
     await waitFor(() => expect(screen.getByText(/Preview rows 1-25 of 30/i)).toBeInTheDocument());

@@ -59,6 +59,17 @@ function formatColumnWarnings(schema: ColumnInferenceResult[]): JSX.Element | nu
   );
 }
 
+function LoadingNotice({ message }: { message: string }): JSX.Element {
+  return (
+    <div className="loading-panel" role="status" aria-live="polite">
+      <div className="loading-bar" aria-hidden="true">
+        <span />
+      </div>
+      <p>{message}</p>
+    </div>
+  );
+}
+
 export default function App() {
   const [view, setView] = useState<ViewState>("connection");
   const [isWorkbenchSidebarOpen, setIsWorkbenchSidebarOpen] = useState(false);
@@ -194,7 +205,7 @@ export default function App() {
   }
 
   async function handleLoadPreviewPage(nextPage: number, nextPageSize: number = rowsPerPage) {
-    if (!result) {
+    if (!result || !selectedKey) {
       return;
     }
 
@@ -205,6 +216,12 @@ export default function App() {
       const preview = await fetchPreviewPage({
         credentials,
         runId: result.runId,
+        objectKey: selectedKey,
+        fileType: result.fileType,
+        selectedSheet: result.selectedSheet,
+        rowCount: result.rowCount,
+        schema: result.schema,
+        previewColumns: result.previewColumns,
         page: nextPage,
         pageSize: nextPageSize,
       });
@@ -280,15 +297,6 @@ export default function App() {
 
   return (
     <main className="page-shell">
-      {busyState !== "idle" ? (
-        <div className="loading-panel" role="status" aria-live="polite">
-          <div className="loading-bar" aria-hidden="true">
-            <span />
-          </div>
-          <p>{busyMessage}</p>
-        </div>
-      ) : null}
-
       {view === "connection" ? (
         <>
           <section className="hero-panel">
@@ -376,6 +384,7 @@ export default function App() {
               ) : files.length > 0 ? (
                 <p className="helper-text">Browsing again will refresh the current workbench file list and preview state.</p>
               ) : null}
+              {busyState === "listing" ? <LoadingNotice message={busyMessage} /> : null}
             </article>
           </section>
         </>
@@ -438,6 +447,8 @@ export default function App() {
                     </label>
                   ) : null}
                 </div>
+
+                {busyState === "paging" ? <LoadingNotice message={busyMessage} /> : null}
 
                 {result ? (
                   <>
@@ -568,6 +579,10 @@ export default function App() {
                         </div>
                       </div>
 
+                      {busyState === "listing" || busyState === "processing" ? (
+                        <LoadingNotice message={busyMessage} />
+                      ) : null}
+
                       {files.length === 0 ? (
                         <div className="empty-state">
                           <p>No supported files were found for this bucket or prefix.</p>
@@ -663,6 +678,7 @@ export default function App() {
                                             [column.column]: event.target.value,
                                           }))
                                         }
+                                        disabled={busyState !== "idle"}
                                       >
                                         {column.allowed_overrides.map((option) => (
                                           <option key={option} value={option}>

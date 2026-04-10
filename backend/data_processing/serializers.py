@@ -44,6 +44,25 @@ class ProcessFileRequestSerializer(S3CredentialsSerializer):
 
 
 class PreviewPageRequestSerializer(S3CredentialsSerializer):
-    run_id = serializers.IntegerField(min_value=1)
+    run_id = serializers.IntegerField(min_value=1, required=False)
+    object_key = serializers.CharField(max_length=1024, trim_whitespace=True, required=False)
+    file_type = serializers.ChoiceField(choices=["csv", "excel"], required=False)
+    selected_sheet = serializers.CharField(
+        max_length=255,
+        trim_whitespace=True,
+        required=False,
+        allow_blank=True,
+    )
+    row_count = serializers.IntegerField(required=False, min_value=0)
+    schema = serializers.ListField(child=serializers.JSONField(), required=False)
+    preview_columns = serializers.ListField(child=serializers.CharField(max_length=255), required=False)
     page = serializers.IntegerField(required=False, min_value=1, default=1)
     page_size = serializers.IntegerField(required=False, min_value=1, max_value=500, default=100)
+
+    def validate(self, attrs):
+        has_preview_context = all(field in attrs for field in ("object_key", "file_type", "row_count", "schema"))
+        if "run_id" not in attrs and not has_preview_context:
+            raise serializers.ValidationError(
+                "Provide either a run_id or the current preview context to load another page."
+            )
+        return attrs

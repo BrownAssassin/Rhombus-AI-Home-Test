@@ -185,6 +185,56 @@ class DataProcessingApiTests(TestCase):
         self.assertEqual(response.json()["previewRows"], [{"Score": 85}, {"Score": 80}])
         self.assertEqual(mocked_preview.call_args.kwargs["row_count"], 4)
 
+    def test_preview_endpoint_falls_back_to_request_context_when_run_is_missing(self) -> None:
+        payload = {
+            **self.credentials_payload,
+            "run_id": 999,
+            "object_key": "incoming/sample.csv",
+            "file_type": "csv",
+            "selected_sheet": "",
+            "row_count": 4,
+            "schema": [
+                {
+                    "column": "Score",
+                    "inferred_type": "integer",
+                    "storage_type": "Int64",
+                    "display_type": "Integer",
+                    "nullable": True,
+                    "confidence": 0.98,
+                    "warnings": [],
+                    "null_token_count": 0,
+                    "sample_values": ["90", "75"],
+                    "allowed_overrides": ["text", "integer", "float", "boolean", "date", "datetime", "category", "complex"],
+                }
+            ],
+            "preview_columns": ["Score"],
+            "page": 2,
+            "page_size": 2,
+        }
+
+        with patch(
+            "data_processing.views.fetch_s3_preview_page",
+            return_value={
+                "rowCount": 4,
+                "previewColumns": ["Score"],
+                "previewRows": [{"Score": 85}, {"Score": 80}],
+                "previewPage": {
+                    "page": 2,
+                    "pageSize": 2,
+                    "totalRows": 4,
+                    "totalPages": 2,
+                    "hasPreviousPage": True,
+                    "hasNextPage": False,
+                },
+            },
+        ) as mocked_preview:
+            response = self.client.post("/api/data/preview", payload, format="json")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["runId"], 999)
+        self.assertEqual(mocked_preview.call_args.kwargs["object_key"], "incoming/sample.csv")
+        self.assertEqual(mocked_preview.call_args.kwargs["row_count"], 4)
+
     def test_preview_endpoint_returns_not_found_for_missing_run(self) -> None:
         payload = {
             **self.credentials_payload,

@@ -1,4 +1,4 @@
-import type { PreviewPageResponse, ProcessResponse, S3CredentialsInput, S3File } from "./types";
+import type { ColumnInferenceResult, PreviewPageResponse, ProcessResponse, S3CredentialsInput, S3File } from "./types";
 
 async function apiFetch<T>(path: string, payload: Record<string, unknown>): Promise<T> {
   let response: Response;
@@ -66,12 +66,24 @@ export async function processFile(payload: {
 export async function fetchPreviewPage(payload: {
   credentials: S3CredentialsInput;
   runId: number;
+  objectKey: string;
+  fileType: "csv" | "excel";
+  selectedSheet: string;
+  rowCount: number;
+  schema: ColumnInferenceResult[];
+  previewColumns: string[];
   page: number;
   pageSize: number;
 }): Promise<PreviewPageResponse> {
   return apiFetch<PreviewPageResponse>("/api/data/preview", {
     ...payload.credentials,
     run_id: payload.runId,
+    object_key: payload.objectKey,
+    file_type: payload.fileType,
+    selected_sheet: payload.selectedSheet,
+    row_count: payload.rowCount,
+    schema: payload.schema,
+    preview_columns: payload.previewColumns,
     page: payload.page,
     page_size: payload.pageSize,
   });
