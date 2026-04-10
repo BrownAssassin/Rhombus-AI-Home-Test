@@ -10,6 +10,9 @@ def main() -> int:
     # Render injects the listening port at runtime, so Gunicorn must bind to
     # that value after the one-time startup tasks complete.
     port = os.getenv("PORT", "8000")
+    workers = os.getenv("WEB_CONCURRENCY", "1")
+    threads = os.getenv("GUNICORN_THREADS", "1")
+    timeout = os.getenv("GUNICORN_TIMEOUT", "180")
     os.execvp(
         "gunicorn",
         [
@@ -17,6 +20,12 @@ def main() -> int:
             "rhombus_home_test.wsgi:application",
             "--bind",
             f"0.0.0.0:{port}",
+            "--workers",
+            workers,
+            "--threads",
+            threads,
+            "--timeout",
+            timeout,
         ],
     )
 

@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass
 from decimal import Decimal, InvalidOperation
 import re
 from typing import Any, Iterable
+import warnings
 
 import pandas as pd
 
@@ -120,9 +121,10 @@ def parse_datetime_candidate(value: str) -> tuple[bool, bool, bool]:
     if not DATE_HINT_RE.search(value):
         return False, False, False
 
-    series = pd.Series([value], dtype="string")
-    parsed = pd.to_datetime(series, errors="coerce")
-    if parsed.isna().all():
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        parsed = pd.to_datetime(value, errors="coerce")
+    if pd.isna(parsed):
         return False, False, False
 
     ambiguous = False
@@ -133,10 +135,12 @@ def parse_datetime_candidate(value: str) -> tuple[bool, bool, bool]:
         if first <= 12 and second <= 12:
             # Keep locale-sensitive short dates as text unless one ordering wins
             # decisively, otherwise pandas can silently reinterpret the data.
-            month_first = pd.to_datetime(series, errors="coerce", dayfirst=False)
-            day_first = pd.to_datetime(series, errors="coerce", dayfirst=True)
-            if not month_first.isna().all() and not day_first.isna().all():
-                ambiguous = month_first.iloc[0] != day_first.iloc[0]
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                month_first = pd.to_datetime(value, errors="coerce", dayfirst=False)
+                day_first = pd.to_datetime(value, errors="coerce", dayfirst=True)
+            if not pd.isna(month_first) and not pd.isna(day_first):
+                ambiguous = month_first != day_first
 
     return True, ambiguous, bool(TIME_HINT_RE.search(value))
 
@@ -158,7 +162,7 @@ def create_profiles(columns: Iterable[str]) -> dict[str, ColumnProfile]:
 def update_profiles_from_dataframe(profiles: dict[str, ColumnProfile], df: pd.DataFrame) -> None:
     for column in df.columns:
         profile = profiles.setdefault(column, ColumnProfile(name=column))
-        for raw_value in df[column].tolist():
+        for raw_value in df[column].array:
             profile.total_count += 1
             normalized = normalize_scalar(raw_value)
             if normalized is None:

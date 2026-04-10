@@ -1,17 +1,42 @@
 import type { PreviewPageResponse, ProcessResponse, S3CredentialsInput, S3File } from "./types";
 
 async function apiFetch<T>(path: string, payload: Record<string, unknown>): Promise<T> {
-  const response = await fetch(path, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+  } catch {
+    throw new Error("The server could not be reached while processing this file. Please try again.");
+  }
 
-  const body = await response.json().catch(() => ({}));
+  const rawBody =
+    typeof response.text === "function"
+      ? await response.text()
+      : JSON.stringify(await response.json().catch(() => ({})));
+  const body = rawBody
+    ? (() => {
+        try {
+          return JSON.parse(rawBody) as Record<string, unknown>;
+        } catch {
+          return {};
+        }
+      })()
+    : {};
   if (!response.ok) {
-    throw new Error(body.detail ?? "Request failed.");
+    if (typeof body.detail === "string") {
+      throw new Error(body.detail);
+    }
+    if (response.status >= 500) {
+      throw new Error(
+        "The server ran out of processing resources for this file. Try a smaller preview page or a smaller file.",
+      );
+    }
+    throw new Error(rawBody || "Request failed.");
   }
 
   return body as T;

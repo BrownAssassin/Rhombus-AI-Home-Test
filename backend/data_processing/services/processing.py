@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import tempfile
 from time import perf_counter
@@ -27,7 +28,11 @@ SUPPORTED_EXTENSIONS = {
     ".xlsx": "excel",
 }
 MAX_EXCEL_SIZE_BYTES = 20 * 1024 * 1024
-CSV_CHUNK_SIZE = 5000
+CSV_CHUNK_SIZE = int(os.getenv("CSV_CHUNK_SIZE", "1000"))
+RESOURCE_LIMIT_MESSAGE = (
+    "The selected file exceeded the available processing resources. "
+    "Try a smaller preview page, a smaller file, or redeploy with more memory."
+)
 
 
 class ProcessingServiceError(Exception):
@@ -58,6 +63,11 @@ class FileTooLargeError(ProcessingServiceError):
 class InvalidPreviewPageError(ProcessingServiceError):
     status_code = 400
     code = "invalid_preview_page"
+
+
+class ResourceLimitError(ProcessingServiceError):
+    status_code = 413
+    code = "resource_limit_exceeded"
 
 
 @dataclass
@@ -154,6 +164,20 @@ def _slice_dataframe_page(df: pd.DataFrame, page: int, page_size: int) -> tuple[
     return dataframe_preview(page_df, len(page_df))
 
 
+def _convert_preview_slice(
+    df: pd.DataFrame,
+    schema: list[dict[str, Any]],
+    *,
+    limit: int,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    if limit <= 0 or df.empty:
+        return [item["column"] for item in schema], []
+
+    preview_frame = df.iloc[:limit]
+    converted_preview = convert_dataframe(preview_frame, schema)
+    return dataframe_preview(converted_preview, len(converted_preview))
+
+
 def _paginate_converted_chunks(
     chunks: Iterator[pd.DataFrame],
     schema: list[dict[str, Any]],
@@ -173,14 +197,13 @@ def _paginate_converted_chunks(
             seen_rows = chunk_end
             continue
 
-        converted = convert_dataframe(chunk, schema)
         local_start = max(start - seen_rows, 0)
-        local_end = min(end - seen_rows, len(converted))
+        local_end = min(end - seen_rows, len(chunk))
         if local_start < local_end:
-            page_columns, chunk_rows = _slice_dataframe_page(
-                converted.iloc[local_start:local_end],
-                page=1,
-                page_size=local_end - local_start,
+            page_columns, chunk_rows = _convert_preview_slice(
+                chunk.iloc[local_start:local_end],
+                schema,
+                limit=local_end - local_start,
             )
             page_rows.extend(chunk_rows)
         seen_rows = chunk_end
@@ -202,8 +225,7 @@ def process_dataframe(
     profiles = create_profiles(df.columns)
     update_profiles_from_dataframe(profiles, df)
     schema, warnings = build_schema_from_profiles(profiles, overrides or {})
-    converted = convert_dataframe(df, schema)
-    preview_columns, preview_rows = dataframe_preview(converted, preview_row_limit)
+    preview_columns, preview_rows = _convert_preview_slice(df, schema, limit=preview_row_limit)
     preview_page = _build_preview_page_metadata(len(df), page=1, page_size=preview_row_limit)
 
     return {
@@ -242,6 +264,8 @@ def _fetch_csv_columns(client, bucket: str, object_key: str) -> list[str]:
         response = client.get_object(Bucket=bucket, Key=object_key)
         with response["Body"] as body:
             return list(pd.read_csv(body, dtype=str, keep_default_na=False, na_filter=False, nrows=0).columns)
+    except MemoryError as exc:
+        raise ResourceLimitError(RESOURCE_LIMIT_MESSAGE) from exc
     except ClientError as exc:
         raise map_client_error(exc) from exc
     except pd.errors.ParserError as exc:
@@ -259,6 +283,8 @@ def _read_csv_chunks(client, bucket: str, object_key: str):
                 na_filter=False,
                 chunksize=CSV_CHUNK_SIZE,
             )
+    except MemoryError as exc:
+        raise ResourceLimitError(RESOURCE_LIMIT_MESSAGE) from exc
     except ClientError as exc:
         raise map_client_error(exc) from exc
     except pd.errors.ParserError as exc:
@@ -274,6 +300,8 @@ def _read_local_csv_chunks(file_path: Path) -> Iterator[pd.DataFrame]:
             na_filter=False,
             chunksize=CSV_CHUNK_SIZE,
         )
+    except MemoryError as exc:
+        raise ResourceLimitError(RESOURCE_LIMIT_MESSAGE) from exc
     except pd.errors.ParserError as exc:
         raise ProcessingServiceError("The selected CSV file could not be parsed.") from exc
 
@@ -281,6 +309,8 @@ def _read_local_csv_chunks(file_path: Path) -> Iterator[pd.DataFrame]:
 def _fetch_local_csv_columns(file_path: Path) -> list[str]:
     try:
         return list(pd.read_csv(file_path, dtype=str, keep_default_na=False, na_filter=False, nrows=0).columns)
+    except MemoryError as exc:
+        raise ResourceLimitError(RESOURCE_LIMIT_MESSAGE) from exc
     except pd.errors.ParserError as exc:
         raise ProcessingServiceError("The selected CSV file could not be parsed.") from exc
 
@@ -299,6 +329,8 @@ def _load_local_excel_dataframe(file_path: Path, sheet_name: str) -> tuple[pd.Da
             dtype=str,
             keep_default_na=False,
         )
+    except MemoryError as exc:
+        raise ResourceLimitError(RESOURCE_LIMIT_MESSAGE) from exc
     except ValueError as exc:
         raise S3AccessError("The requested Excel sheet could not be found.") from exc
 
@@ -313,23 +345,26 @@ def process_s3_object(
     overrides: dict[str, str] | None = None,
     preview_row_limit: int = 100,
 ) -> dict[str, Any]:
-    file_type = resolve_supported_file_type(object_key)
+    try:
+        file_type = resolve_supported_file_type(object_key)
 
-    client = build_s3_client(credentials)
-    started = perf_counter()
+        client = build_s3_client(credentials)
+        started = perf_counter()
 
-    if file_type == "csv":
-        result = _process_csv(client, credentials.bucket, object_key, overrides or {}, preview_row_limit)
-    else:
-        result = _process_excel(client, credentials.bucket, object_key, sheet_name, overrides or {}, preview_row_limit)
+        if file_type == "csv":
+            result = _process_csv(client, credentials.bucket, object_key, overrides or {}, preview_row_limit)
+        else:
+            result = _process_excel(client, credentials.bucket, object_key, sheet_name, overrides or {}, preview_row_limit)
 
-    duration_ms = round((perf_counter() - started) * 1000, 2)
-    result["processingMetadata"] = {
-        "durationMs": duration_ms,
-        "previewRowLimit": preview_row_limit,
-        "chunkSize": CSV_CHUNK_SIZE if file_type == "csv" else None,
-    }
-    return result
+        duration_ms = round((perf_counter() - started) * 1000, 2)
+        result["processingMetadata"] = {
+            "durationMs": duration_ms,
+            "previewRowLimit": preview_row_limit,
+            "chunkSize": CSV_CHUNK_SIZE if file_type == "csv" else None,
+        }
+        return result
+    except MemoryError as exc:
+        raise ResourceLimitError(RESOURCE_LIMIT_MESSAGE) from exc
 
 
 def fetch_s3_preview_page(
@@ -344,43 +379,50 @@ def fetch_s3_preview_page(
     page_size: int,
     preview_columns: list[str] | None = None,
 ) -> dict[str, Any]:
-    preview_page = _build_preview_page_metadata(row_count, page=page, page_size=page_size)
-    page_columns = preview_columns or [item["column"] for item in schema]
+    try:
+        preview_page = _build_preview_page_metadata(row_count, page=page, page_size=page_size)
+        page_columns = preview_columns or [item["column"] for item in schema]
 
-    client = build_s3_client(credentials)
-    if row_count == 0:
+        client = build_s3_client(credentials)
+        if row_count == 0:
+            return {
+                "previewColumns": page_columns,
+                "previewRows": [],
+                "previewPage": preview_page,
+                "rowCount": row_count,
+            }
+
+        if file_type == "csv":
+            page_columns, page_rows = _paginate_converted_chunks(
+                _read_csv_chunks(client, credentials.bucket, object_key),
+                schema,
+                page=page,
+                page_size=page_size,
+            )
+        else:
+            temp_file, _ = _download_object_to_temp_file(client, credentials.bucket, object_key)
+            temp_path = Path(temp_file.name)
+            temp_file.close()
+            try:
+                df, _ = _load_local_excel_dataframe(temp_path, selected_sheet)
+            finally:
+                temp_path.unlink(missing_ok=True)
+
+            start = (page - 1) * page_size
+            page_columns, page_rows = _convert_preview_slice(
+                df.iloc[start : start + page_size],
+                schema,
+                limit=page_size,
+            )
+
         return {
-            "previewColumns": page_columns,
-            "previewRows": [],
+            "previewColumns": page_columns or preview_columns or [item["column"] for item in schema],
+            "previewRows": page_rows,
             "previewPage": preview_page,
             "rowCount": row_count,
         }
-
-    if file_type == "csv":
-        page_columns, page_rows = _paginate_converted_chunks(
-            _read_csv_chunks(client, credentials.bucket, object_key),
-            schema,
-            page=page,
-            page_size=page_size,
-        )
-    else:
-        temp_file, _ = _download_object_to_temp_file(client, credentials.bucket, object_key)
-        temp_path = Path(temp_file.name)
-        temp_file.close()
-        try:
-            df, _ = _load_local_excel_dataframe(temp_path, selected_sheet)
-        finally:
-            temp_path.unlink(missing_ok=True)
-
-        converted = convert_dataframe(df, schema)
-        page_columns, page_rows = _slice_dataframe_page(converted, page=page, page_size=page_size)
-
-    return {
-        "previewColumns": page_columns or preview_columns or [item["column"] for item in schema],
-        "previewRows": page_rows,
-        "previewPage": preview_page,
-        "rowCount": row_count,
-    }
+    except MemoryError as exc:
+        raise ResourceLimitError(RESOURCE_LIMIT_MESSAGE) from exc
 
 
 def process_local_file(
@@ -397,26 +439,29 @@ def process_local_file(
     file_type = resolve_supported_file_type(path.name)
     started = perf_counter()
 
-    if file_type == "csv":
-        result = _process_local_csv(path, overrides or {}, preview_row_limit)
-    else:
-        df, selected_sheet = _load_local_excel_dataframe(path, sheet_name)
-        result = process_dataframe(
-            df,
-            overrides=overrides,
-            preview_row_limit=preview_row_limit,
-            file_type=file_type,
-            object_key=str(path),
-            selected_sheet=selected_sheet,
-        )
+    try:
+        if file_type == "csv":
+            result = _process_local_csv(path, overrides or {}, preview_row_limit)
+        else:
+            df, selected_sheet = _load_local_excel_dataframe(path, sheet_name)
+            result = process_dataframe(
+                df,
+                overrides=overrides,
+                preview_row_limit=preview_row_limit,
+                file_type=file_type,
+                object_key=str(path),
+                selected_sheet=selected_sheet,
+            )
 
-    duration_ms = round((perf_counter() - started) * 1000, 2)
-    result["processingMetadata"] = {
-        "durationMs": duration_ms,
-        "previewRowLimit": preview_row_limit,
-        "chunkSize": CSV_CHUNK_SIZE if file_type == "csv" else None,
-    }
-    return result
+        duration_ms = round((perf_counter() - started) * 1000, 2)
+        result["processingMetadata"] = {
+            "durationMs": duration_ms,
+            "previewRowLimit": preview_row_limit,
+            "chunkSize": CSV_CHUNK_SIZE if file_type == "csv" else None,
+        }
+        return result
+    except MemoryError as exc:
+        raise ResourceLimitError(RESOURCE_LIMIT_MESSAGE) from exc
 
 
 def _process_csv(client, bucket: str, object_key: str, overrides: dict[str, str], preview_row_limit: int) -> dict[str, Any]:
@@ -436,8 +481,10 @@ def _process_csv(client, bucket: str, object_key: str, overrides: dict[str, str]
         # The second streaming pass keeps memory bounded while still returning
         # preview rows after inference and conversions have been finalized.
         for chunk in _read_csv_chunks(client, bucket, object_key):
-            converted = convert_dataframe(chunk, schema)
-            preview_columns, chunk_rows = dataframe_preview(converted, max(preview_row_limit - len(preview_rows), 0))
+            remaining = max(preview_row_limit - len(preview_rows), 0)
+            if remaining == 0:
+                break
+            preview_columns, chunk_rows = _convert_preview_slice(chunk, schema, limit=remaining)
             preview_rows.extend(chunk_rows)
             if len(preview_rows) >= preview_row_limit:
                 break
@@ -507,8 +554,10 @@ def _process_local_csv(file_path: Path, overrides: dict[str, str], preview_row_l
         # Mirror the S3 flow locally so preview output matches the chunked
         # inference behavior users see through the web application.
         for chunk in _read_local_csv_chunks(file_path):
-            converted = convert_dataframe(chunk, schema)
-            preview_columns, chunk_rows = dataframe_preview(converted, max(preview_row_limit - len(preview_rows), 0))
+            remaining = max(preview_row_limit - len(preview_rows), 0)
+            if remaining == 0:
+                break
+            preview_columns, chunk_rows = _convert_preview_slice(chunk, schema, limit=remaining)
             preview_rows.extend(chunk_rows)
             if len(preview_rows) >= preview_row_limit:
                 break

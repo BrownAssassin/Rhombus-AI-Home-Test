@@ -94,6 +94,12 @@ export default function App() {
   const changedOverrideCount = displayedSchema.filter(
     (column) => (overrides[column.column] ?? column.inferred_type) !== column.inferred_type,
   ).length;
+  const busyMessage = {
+    idle: "",
+    listing: "Loading supported files from S3...",
+    processing: "Profiling the dataset and generating the processed preview...",
+    paging: "Loading the requested preview page...",
+  }[busyState];
 
   function resetWorkbenchState() {
     setResult(null);
@@ -274,6 +280,15 @@ export default function App() {
 
   return (
     <main className="page-shell">
+      {busyState !== "idle" ? (
+        <div className="loading-panel" role="status" aria-live="polite">
+          <div className="loading-bar" aria-hidden="true">
+            <span />
+          </div>
+          <p>{busyMessage}</p>
+        </div>
+      ) : null}
+
       {view === "connection" ? (
         <>
           <section className="hero-panel">
