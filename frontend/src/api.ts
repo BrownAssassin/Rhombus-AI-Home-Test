@@ -31,9 +31,20 @@ async function apiFetch<T>(path: string, payload: Record<string, unknown>): Prom
     if (typeof body.detail === "string") {
       throw new Error(body.detail);
     }
+    if (body.code === "resource_limit_exceeded" || response.status === 413) {
+      throw new Error(
+        "The server could not finish processing this file within the deployment limits. Try again, reduce the preview page size, or redeploy with more conservative worker settings.",
+      );
+    }
+    const loweredBody = rawBody.toLowerCase();
+    if (loweredBody.includes("out of memory") || loweredBody.includes("sigkill")) {
+      throw new Error(
+        "The deployment appears to have run out of memory while processing this file. Redeploy with conservative worker settings and try again.",
+      );
+    }
     if (response.status >= 500) {
       throw new Error(
-        "The server ran out of processing resources for this file. Try a smaller preview page or a smaller file.",
+        "The deployment could not finish processing this file. The server may have restarted or hit a platform limit. Please try again and inspect the server logs if it keeps happening.",
       );
     }
     throw new Error(rawBody || "Request failed.");

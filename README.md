@@ -102,6 +102,9 @@ The app works locally without extra configuration, but these variables are suppo
 - `DJANGO_CSRF_TRUSTED_ORIGINS`: comma-separated trusted origins
 - `DJANGO_SQLITE_PATH`: optional SQLite database path
 - `DJANGO_FRONTEND_BUILD_DIR`: optional override for the built frontend location
+- `WEB_CONCURRENCY`: Gunicorn worker count for the container runtime
+- `GUNICORN_TIMEOUT`: Gunicorn request timeout in seconds
+- `CSV_CHUNK_SIZE`: chunk size used for CSV profiling and preview paging
 - `PORT`: port used by the container startup command
 
 On Render, `RENDER_EXTERNAL_HOSTNAME` and `RENDER_EXTERNAL_URL` are injected automatically and merged into Django's trusted host and origin lists. You only need to set `DJANGO_ALLOWED_HOSTS` or `DJANGO_CSRF_TRUSTED_ORIGINS` manually if you later add a custom domain.
@@ -279,6 +282,9 @@ Optional settings:
 - `DJANGO_ALLOWED_HOSTS`: only needed if you later add a custom domain
 - `DJANGO_CSRF_TRUSTED_ORIGINS`: only needed if you later add a custom domain
 - `DJANGO_SQLITE_PATH=/app/data/db.sqlite3`: only needed if you later attach a persistent disk and want the SQLite file to survive redeploys
+- `WEB_CONCURRENCY=1`: recommended for the starter Render instance size
+- `GUNICORN_TIMEOUT=180`: gives longer CSV processing requests room to finish
+- `CSV_CHUNK_SIZE=500`: keeps CSV memory use conservative during profiling and paging
 
 Render automatically provides `PORT`, `RENDER_EXTERNAL_HOSTNAME`, and `RENDER_EXTERNAL_URL`, and the app is configured to trust those values without any extra setup.
 
@@ -292,7 +298,7 @@ Render automatically provides `PORT`, `RENDER_EXTERNAL_HOSTNAME`, and `RENDER_EX
 ## Notes and limitations
 
 - AWS credentials are accepted at runtime and are intentionally not stored in the database.
-- CSV handling is chunked for profiling and preview generation; Excel handling is capped at 20 MB in this MVP.
+- CSV handling is chunked after staging the S3 object to a temp file, which keeps the web path aligned with the local CLI flow. Excel handling is capped at 20 MB in this MVP.
 - Type inference is intentionally conservative. Ambiguous date columns stay as text unless the user overrides them.
 - The app supports paginated preview browsing across the processed dataset, but it does not export a full transformed file in this MVP.
 - A Render deployment that keeps SQLite in the container filesystem is suitable for demos, but `ProcessingRun` history resets whenever the service is rebuilt or restarted.

@@ -28,7 +28,7 @@ SUPPORTED_EXTENSIONS = {
     ".xlsx": "excel",
 }
 MAX_EXCEL_SIZE_BYTES = 20 * 1024 * 1024
-CSV_CHUNK_SIZE = int(os.getenv("CSV_CHUNK_SIZE", "1000"))
+CSV_CHUNK_SIZE = int(os.getenv("CSV_CHUNK_SIZE", "500"))
 RESOURCE_LIMIT_MESSAGE = (
     "The selected file exceeded the available processing resources. "
     "Try a smaller preview page, a smaller file, or redeploy with more memory."
@@ -258,54 +258,45 @@ def process_dataframe(
     }
 
 
-def _download_object_to_temp_file(client, bucket: str, object_key: str) -> tuple[tempfile.NamedTemporaryFile, int]:
+def _download_object_to_temp_file(
+    client,
+    bucket: str,
+    object_key: str,
+    *,
+    max_size_bytes: int | None = None,
+) -> tuple[tempfile.NamedTemporaryFile, int]:
+    temp_file: tempfile.NamedTemporaryFile | None = None
+
+    def cleanup_temp_file() -> None:
+        if temp_file is None:
+            return
+        temp_path = Path(temp_file.name)
+        temp_file.close()
+        temp_path.unlink(missing_ok=True)
+
     try:
         head = client.head_object(Bucket=bucket, Key=object_key)
         content_length = int(head.get("ContentLength", 0))
-        if content_length > MAX_EXCEL_SIZE_BYTES:
+        if max_size_bytes is not None and content_length > max_size_bytes:
             raise FileTooLargeError(
-                f"Excel files larger than {MAX_EXCEL_SIZE_BYTES // (1024 * 1024)} MB are rejected in this MVP."
-            )
-        # Pandas' Excel readers expect a local file and load whole sheets into
-        # memory, so we cap size early and stage the object in temp storage.
+                f"Excel files larger than {max_size_bytes // (1024 * 1024)} MB are rejected in this MVP."
+        )
+        # Staging S3 objects on disk keeps the processing path deterministic and
+        # lets the chunked local readers handle larger CSVs without relying on a
+        # long-lived streaming response body.
         temp_file = tempfile.NamedTemporaryFile(suffix=Path(object_key).suffix, delete=False)
         client.download_fileobj(bucket, object_key, temp_file)
         temp_file.flush()
         return temp_file, content_length
     except ClientError as exc:
+        cleanup_temp_file()
         raise map_client_error(exc) from exc
-
-
-def _fetch_csv_columns(client, bucket: str, object_key: str) -> list[str]:
-    try:
-        response = client.get_object(Bucket=bucket, Key=object_key)
-        with response["Body"] as body:
-            return list(pd.read_csv(body, dtype=str, keep_default_na=False, na_filter=False, nrows=0).columns)
-    except MemoryError as exc:
-        raise ResourceLimitError(RESOURCE_LIMIT_MESSAGE) from exc
-    except ClientError as exc:
-        raise map_client_error(exc) from exc
-    except pd.errors.ParserError as exc:
-        raise ProcessingServiceError("The selected CSV file could not be parsed.") from exc
-
-
-def _read_csv_chunks(client, bucket: str, object_key: str):
-    try:
-        response = client.get_object(Bucket=bucket, Key=object_key)
-        with response["Body"] as body:
-            yield from pd.read_csv(
-                body,
-                dtype=str,
-                keep_default_na=False,
-                na_filter=False,
-                chunksize=CSV_CHUNK_SIZE,
-            )
-    except MemoryError as exc:
-        raise ResourceLimitError(RESOURCE_LIMIT_MESSAGE) from exc
-    except ClientError as exc:
-        raise map_client_error(exc) from exc
-    except pd.errors.ParserError as exc:
-        raise ProcessingServiceError("The selected CSV file could not be parsed.") from exc
+    except BotoCoreError as exc:
+        cleanup_temp_file()
+        raise ProcessingServiceError("Unable to communicate with S3.") from exc
+    except Exception:
+        cleanup_temp_file()
+        raise
 
 
 def _read_local_csv_chunks(file_path: Path) -> Iterator[pd.DataFrame]:
@@ -330,6 +321,39 @@ def _fetch_local_csv_columns(file_path: Path) -> list[str]:
         raise ResourceLimitError(RESOURCE_LIMIT_MESSAGE) from exc
     except pd.errors.ParserError as exc:
         raise ProcessingServiceError("The selected CSV file could not be parsed.") from exc
+
+
+def _fetch_local_csv_preview_page(
+    file_path: Path,
+    *,
+    schema: list[dict[str, Any]],
+    row_count: int,
+    page: int,
+    page_size: int,
+    preview_columns: list[str] | None = None,
+) -> dict[str, Any]:
+    preview_page = _build_preview_page_metadata(row_count, page=page, page_size=page_size)
+    page_columns = preview_columns or [item["column"] for item in schema]
+    if row_count == 0:
+        return {
+            "previewColumns": page_columns,
+            "previewRows": [],
+            "previewPage": preview_page,
+            "rowCount": row_count,
+        }
+
+    page_columns, page_rows = _paginate_converted_chunks(
+        _read_local_csv_chunks(file_path),
+        schema,
+        page=page,
+        page_size=page_size,
+    )
+    return {
+        "previewColumns": page_columns or preview_columns or [item["column"] for item in schema],
+        "previewRows": page_rows,
+        "previewPage": preview_page,
+        "rowCount": row_count,
+    }
 
 
 def _load_local_excel_dataframe(file_path: Path, sheet_name: str) -> tuple[pd.DataFrame, str]:
@@ -397,27 +421,29 @@ def fetch_s3_preview_page(
     preview_columns: list[str] | None = None,
 ) -> dict[str, Any]:
     try:
-        preview_page = _build_preview_page_metadata(row_count, page=page, page_size=page_size)
-        page_columns = preview_columns or [item["column"] for item in schema]
-
         client = build_s3_client(credentials)
-        if row_count == 0:
-            return {
-                "previewColumns": page_columns,
-                "previewRows": [],
-                "previewPage": preview_page,
-                "rowCount": row_count,
-            }
-
         if file_type == "csv":
-            page_columns, page_rows = _paginate_converted_chunks(
-                _read_csv_chunks(client, credentials.bucket, object_key),
-                schema,
-                page=page,
-                page_size=page_size,
-            )
-        else:
             temp_file, _ = _download_object_to_temp_file(client, credentials.bucket, object_key)
+            temp_path = Path(temp_file.name)
+            temp_file.close()
+            try:
+                return _fetch_local_csv_preview_page(
+                    temp_path,
+                    schema=schema,
+                    row_count=row_count,
+                    page=page,
+                    page_size=page_size,
+                    preview_columns=preview_columns,
+                )
+            finally:
+                temp_path.unlink(missing_ok=True)
+        else:
+            temp_file, _ = _download_object_to_temp_file(
+                client,
+                credentials.bucket,
+                object_key,
+                max_size_bytes=MAX_EXCEL_SIZE_BYTES,
+            )
             temp_path = Path(temp_file.name)
             temp_file.close()
             try:
@@ -425,9 +451,9 @@ def fetch_s3_preview_page(
             finally:
                 temp_path.unlink(missing_ok=True)
 
-            start = (page - 1) * page_size
+            preview_page = _build_preview_page_metadata(row_count, page=page, page_size=page_size)
             page_columns, page_rows = _convert_preview_slice(
-                df.iloc[start : start + page_size],
+                df.iloc[(page - 1) * page_size : page * page_size],
                 schema,
                 limit=page_size,
             )
@@ -482,41 +508,20 @@ def process_local_file(
 
 
 def _process_csv(client, bucket: str, object_key: str, overrides: dict[str, str], preview_row_limit: int) -> dict[str, Any]:
-    columns = _fetch_csv_columns(client, bucket, object_key)
-    profiles = create_profiles(columns)
-    row_count = 0
-    preview_frames: list[pd.DataFrame] = []
-    collected_preview_rows = 0
+    temp_file, _ = _download_object_to_temp_file(client, bucket, object_key)
+    temp_path = Path(temp_file.name)
+    temp_file.close()
 
-    for chunk in _read_csv_chunks(client, bucket, object_key):
-        row_count += len(chunk)
-        update_profiles_from_dataframe(profiles, chunk)
-        collected_preview_rows = _capture_preview_frame(
-            preview_frames,
-            chunk,
-            collected_rows=collected_preview_rows,
-            preview_row_limit=preview_row_limit,
-        )
-
-    schema, warnings = build_schema_from_profiles(profiles, overrides)
-
-    preview_rows: list[dict[str, Any]] = []
-    preview_columns: list[str] = columns
-    if preview_frames:
-        preview_source = pd.concat(preview_frames, ignore_index=True)
-        preview_columns, preview_rows = _convert_preview_slice(preview_source, schema, limit=preview_row_limit)
+    try:
+        result = _process_local_csv(temp_path, overrides, preview_row_limit)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
     return {
         "bucket": bucket,
         "objectKey": object_key,
-        "fileType": "csv",
-        "selectedSheet": "",
-        "rowCount": row_count,
-        "schema": schema,
-        "previewColumns": preview_columns,
-        "previewRows": preview_rows[:preview_row_limit],
-        "previewPage": _build_preview_page_metadata(row_count, page=1, page_size=preview_row_limit),
-        "warnings": warnings,
+        **result,
+        "objectKey": object_key,
     }
 
 
@@ -528,7 +533,12 @@ def _process_excel(
     overrides: dict[str, str],
     preview_row_limit: int,
 ) -> dict[str, Any]:
-    temp_file, _ = _download_object_to_temp_file(client, bucket, object_key)
+    temp_file, _ = _download_object_to_temp_file(
+        client,
+        bucket,
+        object_key,
+        max_size_bytes=MAX_EXCEL_SIZE_BYTES,
+    )
     temp_path = Path(temp_file.name)
     temp_file.close()
 
