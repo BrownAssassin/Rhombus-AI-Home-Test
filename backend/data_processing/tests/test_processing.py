@@ -9,6 +9,7 @@ from django.test import SimpleTestCase
 from data_processing.services.processing import (
     CSV_CHUNK_SIZE,
     S3Credentials,
+    clear_staged_file_cache,
     fetch_s3_preview_page,
     list_supported_files,
     process_local_file,
@@ -28,6 +29,8 @@ class FakeS3Client:
     def __init__(self, *, objects=None, pages=None):
         self.objects = objects or {}
         self.pages = pages or []
+        self.head_calls = 0
+        self.download_calls = 0
 
     def get_paginator(self, name: str):
         if name != "list_objects_v2":
@@ -38,14 +41,18 @@ class FakeS3Client:
         return {"Body": io.BytesIO(self.objects[Key])}
 
     def head_object(self, Bucket: str, Key: str):
-        return {"ContentLength": len(self.objects[Key])}
+        self.head_calls += 1
+        return {"ContentLength": len(self.objects[Key]), "ETag": '"demo-etag"'}
 
     def download_fileobj(self, Bucket: str, Key: str, fileobj):
+        self.download_calls += 1
         fileobj.write(self.objects[Key])
 
 
 class ProcessingServiceTests(SimpleTestCase):
     def setUp(self) -> None:
+        clear_staged_file_cache()
+        self.addCleanup(clear_staged_file_cache)
         self.credentials = S3Credentials(
             access_key_id="access",
             secret_access_key="secret",
@@ -122,6 +129,25 @@ class ProcessingServiceTests(SimpleTestCase):
         self.assertEqual(len(result["previewRows"]), 2)
         self.assertEqual(result["previewColumns"], ["Name", "Score"])
 
+    def test_process_local_file_formats_date_and_datetime_previews_distinctly(self) -> None:
+        with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, encoding="utf-8", newline="") as handle:
+            handle.write("MeetingDay,OccurredAt\n1990-01-01 15:30:00,1990-01-01 15:30:00\n")
+            csv_path = Path(handle.name)
+
+        self.addCleanup(csv_path.unlink, missing_ok=True)
+
+        result = process_local_file(
+            csv_path,
+            overrides={
+                "MeetingDay": "date",
+                "OccurredAt": "datetime",
+            },
+            preview_row_limit=1,
+        )
+
+        self.assertEqual(result["previewRows"][0]["MeetingDay"], "1990-01-01")
+        self.assertEqual(result["previewRows"][0]["OccurredAt"], "1990-01-01T15:30:00")
+
     def test_fetch_s3_preview_page_uses_stored_schema_for_requested_page(self) -> None:
         fake_client = FakeS3Client(
             objects={
@@ -176,4 +202,34 @@ class ProcessingServiceTests(SimpleTestCase):
 
         self.assertEqual(preview["previewPage"]["page"], 2)
         self.assertEqual(preview["previewPage"]["totalPages"], 2)
+        self.assertEqual(preview["previewRows"], [{"Name": "Charlie", "Score": 80}, {"Name": "David", "Score": 75}])
+
+    def test_csv_staging_cache_reuses_downloaded_object_for_follow_up_preview(self) -> None:
+        fake_client = FakeS3Client(
+            objects={
+                "incoming/sample.csv": (
+                    b"Name,Score\n"
+                    b"Alice,90\n"
+                    b"Bob,85\n"
+                    b"Charlie,80\n"
+                    b"David,75\n"
+                )
+            }
+        )
+
+        with patch("data_processing.services.processing.build_s3_client", return_value=fake_client):
+            result = process_s3_object(self.credentials, "incoming/sample.csv", preview_row_limit=2)
+            preview = fetch_s3_preview_page(
+                credentials=self.credentials,
+                object_key="incoming/sample.csv",
+                file_type="csv",
+                selected_sheet="",
+                schema=result["schema"],
+                row_count=result["rowCount"],
+                page=2,
+                page_size=2,
+                preview_columns=result["previewColumns"],
+            )
+
+        self.assertEqual(fake_client.download_calls, 1)
         self.assertEqual(preview["previewRows"], [{"Name": "Charlie", "Score": 80}, {"Name": "David", "Score": 75}])

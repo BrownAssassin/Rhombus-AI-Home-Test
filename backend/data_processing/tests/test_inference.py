@@ -21,6 +21,19 @@ class InferenceServiceTests(SimpleTestCase):
         self.assertEqual(schema["event_date"]["inferred_type"], "text")
         self.assertIn("ambiguous", schema["event_date"]["warnings"][0].lower())
 
+    def test_infer_dataframe_relaxes_category_rule_for_small_repeated_labels(self) -> None:
+        df = pd.DataFrame(
+            {
+                "grade": ["A", "B", "A", "B", "A"],
+                "name": ["Alice", "Bob", "Charlie", "David", "Eve"],
+            }
+        )
+
+        schema = {item["column"]: item for item in infer_dataframe(df)}
+
+        self.assertEqual(schema["grade"]["inferred_type"], "category")
+        self.assertEqual(schema["name"]["inferred_type"], "text")
+
     def test_validate_overrides_rejects_unsafe_integer_conversion(self) -> None:
         df = pd.DataFrame({"mixed": ["1", "two", "3"]})
 
@@ -29,4 +42,3 @@ class InferenceServiceTests(SimpleTestCase):
 
         with self.assertRaisesMessage(ValueError, "cannot be safely converted to 'integer'"):
             validate_overrides(profiles, schema, {"mixed": "integer"})
-

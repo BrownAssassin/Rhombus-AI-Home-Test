@@ -37,6 +37,12 @@ DATE_HINT_RE = re.compile(
 )
 TIME_HINT_RE = re.compile(r"(\d{1,2}:\d{2})|(T\d{1,2}:\d{2})")
 GROUPED_NUMBER_RE = re.compile(r"^[+-]?\d{1,3}(,\d{3})+(\.\d+)?([eE][+-]?\d+)?$")
+SMALL_SAMPLE_CATEGORY_MIN_ROWS = 5
+SMALL_SAMPLE_CATEGORY_MAX_UNIQUE = 5
+SMALL_SAMPLE_CATEGORY_MAX_RATIO = 0.4
+LARGE_SAMPLE_CATEGORY_MIN_ROWS = 20
+LARGE_SAMPLE_CATEGORY_MAX_UNIQUE = 50
+LARGE_SAMPLE_CATEGORY_MAX_RATIO = 0.2
 
 
 @dataclass
@@ -237,11 +243,23 @@ def build_column_inference(profile: ColumnProfile) -> ColumnInference:
         storage_type = "object"
     else:
         unique_ratio = profile.unique_count / profile.non_null_count if profile.non_null_count else 1
-        # Small samples often look categorical by accident, so only promote
-        # strings when cardinality stays low across a reasonably sized column.
-        if profile.non_null_count >= 20 and profile.unique_count <= 50 and unique_ratio <= 0.2:
+        # Prefer text unless repeated labels stay convincingly low-cardinality.
+        # We allow a slightly softer rule for tiny demo-sized datasets so
+        # columns like "A/B/A/B/A" can still surface as category, but all- or
+        # mostly-unique small samples remain text.
+        qualifies_large_sample = (
+            profile.non_null_count >= LARGE_SAMPLE_CATEGORY_MIN_ROWS
+            and profile.unique_count <= LARGE_SAMPLE_CATEGORY_MAX_UNIQUE
+            and unique_ratio <= LARGE_SAMPLE_CATEGORY_MAX_RATIO
+        )
+        qualifies_small_sample = (
+            profile.non_null_count >= SMALL_SAMPLE_CATEGORY_MIN_ROWS
+            and profile.unique_count <= SMALL_SAMPLE_CATEGORY_MAX_UNIQUE
+            and unique_ratio <= SMALL_SAMPLE_CATEGORY_MAX_RATIO
+        )
+        if qualifies_large_sample or qualifies_small_sample:
             inferred_type = "category"
-            confidence = 0.76
+            confidence = 0.76 if qualifies_large_sample else 0.64
             storage_type = "category"
 
     return ColumnInference(
@@ -325,6 +343,14 @@ def validate_overrides(
     return [schema_by_column[item["column"]] for item in schema]
 
 
+def _parse_datetime_series(normalized: pd.Series, series_name: str) -> pd.Series:
+    dt_series = pd.to_datetime(normalized, errors="coerce")
+    invalid = normalized.notna() & dt_series.isna()
+    if invalid.any():
+        raise ValueError(f"Column '{series_name}' contains values that are not valid dates.")
+    return dt_series
+
+
 def convert_series(series: pd.Series, target_type: str) -> pd.Series:
     normalized = series.map(normalize_scalar)
 
@@ -352,11 +378,12 @@ def convert_series(series: pd.Series, target_type: str) -> pd.Series:
             return parsed.astype("boolean")
         raise ValueError(f"Column '{series.name}' contains non-boolean values.")
 
-    if target_type in {"date", "datetime"}:
-        dt_series = pd.to_datetime(normalized, errors="coerce")
-        invalid = normalized.notna() & dt_series.isna()
-        if invalid.any():
-            raise ValueError(f"Column '{series.name}' contains values that are not valid dates.")
+    if target_type == "date":
+        dt_series = _parse_datetime_series(normalized, series.name)
+        return dt_series.dt.normalize()
+
+    if target_type == "datetime":
+        dt_series = _parse_datetime_series(normalized, series.name)
         return dt_series
 
     if target_type == "complex":
@@ -374,10 +401,12 @@ def convert_dataframe(df: pd.DataFrame, schema: list[dict[str, Any]]) -> pd.Data
     return converted
 
 
-def serialize_scalar(value: Any) -> Any:
+def serialize_scalar(value: Any, *, target_type: str | None = None) -> Any:
     if value is None or pd.isna(value):
         return None
     if isinstance(value, pd.Timestamp):
+        if target_type == "date":
+            return value.date().isoformat()
         return value.isoformat()
     if hasattr(value, "item"):
         try:
@@ -389,9 +418,20 @@ def serialize_scalar(value: Any) -> Any:
     return value
 
 
-def dataframe_preview(df: pd.DataFrame, limit: int) -> tuple[list[str], list[dict[str, Any]]]:
+def dataframe_preview(
+    df: pd.DataFrame,
+    limit: int,
+    *,
+    schema: list[dict[str, Any]] | None = None,
+) -> tuple[list[str], list[dict[str, Any]]]:
     preview_df = df.head(limit)
+    target_types = {item["column"]: item["inferred_type"] for item in schema or []}
     rows = []
     for _, row in preview_df.iterrows():
-        rows.append({column: serialize_scalar(value) for column, value in row.items()})
+        rows.append(
+            {
+                column: serialize_scalar(value, target_type=target_types.get(column))
+                for column, value in row.items()
+            }
+        )
     return list(preview_df.columns), rows

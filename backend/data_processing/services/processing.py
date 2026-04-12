@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import Iterator
 from dataclasses import dataclass
 import os
 from pathlib import Path
 import tempfile
+import threading
+import time
 from time import perf_counter
 from typing import Any
 
@@ -29,6 +32,8 @@ SUPPORTED_EXTENSIONS = {
 }
 MAX_EXCEL_SIZE_BYTES = 20 * 1024 * 1024
 CSV_CHUNK_SIZE = int(os.getenv("CSV_CHUNK_SIZE", "500"))
+STAGED_FILE_CACHE_MAX_ITEMS = max(0, int(os.getenv("STAGED_FILE_CACHE_MAX_ITEMS", "2")))
+STAGED_FILE_CACHE_TTL_SECONDS = max(0, int(os.getenv("STAGED_FILE_CACHE_TTL_SECONDS", "900")))
 RESOURCE_LIMIT_MESSAGE = (
     "The selected file exceeded the available processing resources. "
     "Try a smaller preview page, a smaller file, or redeploy with more memory."
@@ -78,6 +83,98 @@ class S3Credentials:
     bucket: str
     session_token: str = ""
     prefix: str = ""
+
+
+@dataclass(frozen=True)
+class S3ObjectMetadata:
+    content_length: int
+    etag: str
+
+
+@dataclass
+class StagedFileCacheEntry:
+    path: Path
+    content_length: int
+    etag: str
+    cached_at: float
+
+
+class StagedFileCache:
+    def __init__(self, *, max_items: int, ttl_seconds: int) -> None:
+        self.max_items = max_items
+        self.ttl_seconds = ttl_seconds
+        # A tiny disk-backed cache keeps the single-instance deployment from
+        # re-downloading the same S3 object for every page change or override.
+        self._entries: OrderedDict[tuple[str, str], StagedFileCacheEntry] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def clear(self) -> None:
+        with self._lock:
+            for entry in self._entries.values():
+                entry.path.unlink(missing_ok=True)
+            self._entries.clear()
+
+    def get(self, bucket: str, object_key: str, *, metadata: S3ObjectMetadata) -> Path | None:
+        cache_key = (bucket, object_key)
+        now = time.time()
+        with self._lock:
+            self._purge_expired_locked(now)
+            entry = self._entries.get(cache_key)
+            if entry is None:
+                return None
+            if (
+                not entry.path.exists()
+                or entry.content_length != metadata.content_length
+                or entry.etag != metadata.etag
+            ):
+                self._remove_entry_locked(cache_key)
+                return None
+            self._entries.move_to_end(cache_key)
+            return entry.path
+
+    def put(self, bucket: str, object_key: str, *, metadata: S3ObjectMetadata, path: Path) -> Path:
+        cache_key = (bucket, object_key)
+        entry = StagedFileCacheEntry(
+            path=path,
+            content_length=metadata.content_length,
+            etag=metadata.etag,
+            cached_at=time.time(),
+        )
+        with self._lock:
+            self._purge_expired_locked(entry.cached_at)
+            existing = self._entries.pop(cache_key, None)
+            if existing is not None and existing.path != path:
+                existing.path.unlink(missing_ok=True)
+            self._entries[cache_key] = entry
+            self._entries.move_to_end(cache_key)
+            self._evict_overflow_locked()
+        return path
+
+    def _purge_expired_locked(self, now: float) -> None:
+        if self.ttl_seconds <= 0:
+            while self._entries:
+                self._remove_entry_locked(next(iter(self._entries)))
+            return
+
+        for cache_key in list(self._entries):
+            entry = self._entries[cache_key]
+            if not entry.path.exists() or now - entry.cached_at > self.ttl_seconds:
+                self._remove_entry_locked(cache_key)
+
+    def _evict_overflow_locked(self) -> None:
+        while len(self._entries) > self.max_items:
+            self._remove_entry_locked(next(iter(self._entries)))
+
+    def _remove_entry_locked(self, cache_key: tuple[str, str]) -> None:
+        entry = self._entries.pop(cache_key, None)
+        if entry is not None:
+            entry.path.unlink(missing_ok=True)
+
+
+STAGED_FILE_CACHE = StagedFileCache(
+    max_items=STAGED_FILE_CACHE_MAX_ITEMS,
+    ttl_seconds=STAGED_FILE_CACHE_TTL_SECONDS,
+)
 
 
 def build_s3_client(credentials: S3Credentials):
@@ -142,6 +239,10 @@ def build_schema_from_profiles(profiles, overrides: dict[str, str]) -> tuple[lis
     return schema, warnings
 
 
+def clear_staged_file_cache() -> None:
+    STAGED_FILE_CACHE.clear()
+
+
 def _build_preview_page_metadata(row_count: int, page: int, page_size: int) -> dict[str, Any]:
     total_pages = max(1, (row_count + page_size - 1) // page_size) if row_count else 1
     if page > total_pages:
@@ -157,13 +258,6 @@ def _build_preview_page_metadata(row_count: int, page: int, page_size: int) -> d
     }
 
 
-def _slice_dataframe_page(df: pd.DataFrame, page: int, page_size: int) -> tuple[list[str], list[dict[str, Any]]]:
-    start = (page - 1) * page_size
-    end = start + page_size
-    page_df = df.iloc[start:end]
-    return dataframe_preview(page_df, len(page_df))
-
-
 def _convert_preview_slice(
     df: pd.DataFrame,
     schema: list[dict[str, Any]],
@@ -175,7 +269,7 @@ def _convert_preview_slice(
 
     preview_frame = df.iloc[:limit]
     converted_preview = convert_dataframe(preview_frame, schema)
-    return dataframe_preview(converted_preview, len(converted_preview))
+    return dataframe_preview(converted_preview, len(converted_preview), schema=schema)
 
 
 def _capture_preview_frame(
@@ -258,13 +352,40 @@ def process_dataframe(
     }
 
 
-def _download_object_to_temp_file(
+def _head_object_metadata(
     client,
     bucket: str,
     object_key: str,
     *,
     max_size_bytes: int | None = None,
-) -> tuple[tempfile.NamedTemporaryFile, int]:
+) -> S3ObjectMetadata:
+    try:
+        head = client.head_object(Bucket=bucket, Key=object_key)
+    except ClientError as exc:
+        raise map_client_error(exc) from exc
+    except BotoCoreError as exc:
+        raise ProcessingServiceError("Unable to communicate with S3.") from exc
+
+    content_length = int(head.get("ContentLength", 0))
+    if max_size_bytes is not None and content_length > max_size_bytes:
+        raise FileTooLargeError(
+            f"Excel files larger than {max_size_bytes // (1024 * 1024)} MB are rejected in this MVP."
+        )
+
+    return S3ObjectMetadata(
+        content_length=content_length,
+        etag=str(head.get("ETag", "")).strip('"'),
+    )
+
+
+def _download_object_to_temp_file(
+    client,
+    bucket: str,
+    object_key: str,
+    *,
+    metadata: S3ObjectMetadata | None = None,
+    max_size_bytes: int | None = None,
+) -> tuple[Path, int]:
     temp_file: tempfile.NamedTemporaryFile | None = None
 
     def cleanup_temp_file() -> None:
@@ -275,11 +396,11 @@ def _download_object_to_temp_file(
         temp_path.unlink(missing_ok=True)
 
     try:
-        head = client.head_object(Bucket=bucket, Key=object_key)
-        content_length = int(head.get("ContentLength", 0))
-        if max_size_bytes is not None and content_length > max_size_bytes:
-            raise FileTooLargeError(
-                f"Excel files larger than {max_size_bytes // (1024 * 1024)} MB are rejected in this MVP."
+        resolved_metadata = metadata or _head_object_metadata(
+            client,
+            bucket,
+            object_key,
+            max_size_bytes=max_size_bytes,
         )
         # Staging S3 objects on disk keeps the processing path deterministic and
         # lets the chunked local readers handle larger CSVs without relying on a
@@ -287,7 +408,10 @@ def _download_object_to_temp_file(
         temp_file = tempfile.NamedTemporaryFile(suffix=Path(object_key).suffix, delete=False)
         client.download_fileobj(bucket, object_key, temp_file)
         temp_file.flush()
-        return temp_file, content_length
+        temp_path = Path(temp_file.name)
+        temp_file.close()
+        temp_file = None
+        return temp_path, resolved_metadata.content_length
     except ClientError as exc:
         cleanup_temp_file()
         raise map_client_error(exc) from exc
@@ -297,6 +421,32 @@ def _download_object_to_temp_file(
     except Exception:
         cleanup_temp_file()
         raise
+
+
+def _get_staged_s3_object_path(
+    client,
+    bucket: str,
+    object_key: str,
+    *,
+    max_size_bytes: int | None = None,
+) -> tuple[Path, int]:
+    metadata = _head_object_metadata(
+        client,
+        bucket,
+        object_key,
+        max_size_bytes=max_size_bytes,
+    )
+    cached_path = STAGED_FILE_CACHE.get(bucket, object_key, metadata=metadata)
+    if cached_path is not None:
+        return cached_path, metadata.content_length
+
+    temp_path, _ = _download_object_to_temp_file(
+        client,
+        bucket,
+        object_key,
+        metadata=metadata,
+    )
+    return STAGED_FILE_CACHE.put(bucket, object_key, metadata=metadata, path=temp_path), metadata.content_length
 
 
 def _read_local_csv_chunks(file_path: Path) -> Iterator[pd.DataFrame]:
@@ -423,33 +573,23 @@ def fetch_s3_preview_page(
     try:
         client = build_s3_client(credentials)
         if file_type == "csv":
-            temp_file, _ = _download_object_to_temp_file(client, credentials.bucket, object_key)
-            temp_path = Path(temp_file.name)
-            temp_file.close()
-            try:
-                return _fetch_local_csv_preview_page(
-                    temp_path,
-                    schema=schema,
-                    row_count=row_count,
-                    page=page,
-                    page_size=page_size,
-                    preview_columns=preview_columns,
-                )
-            finally:
-                temp_path.unlink(missing_ok=True)
+            staged_path, _ = _get_staged_s3_object_path(client, credentials.bucket, object_key)
+            return _fetch_local_csv_preview_page(
+                staged_path,
+                schema=schema,
+                row_count=row_count,
+                page=page,
+                page_size=page_size,
+                preview_columns=preview_columns,
+            )
         else:
-            temp_file, _ = _download_object_to_temp_file(
+            staged_path, _ = _get_staged_s3_object_path(
                 client,
                 credentials.bucket,
                 object_key,
                 max_size_bytes=MAX_EXCEL_SIZE_BYTES,
             )
-            temp_path = Path(temp_file.name)
-            temp_file.close()
-            try:
-                df, _ = _load_local_excel_dataframe(temp_path, selected_sheet)
-            finally:
-                temp_path.unlink(missing_ok=True)
+            df, _ = _load_local_excel_dataframe(staged_path, selected_sheet)
 
             preview_page = _build_preview_page_metadata(row_count, page=page, page_size=page_size)
             page_columns, page_rows = _convert_preview_slice(
@@ -508,20 +648,13 @@ def process_local_file(
 
 
 def _process_csv(client, bucket: str, object_key: str, overrides: dict[str, str], preview_row_limit: int) -> dict[str, Any]:
-    temp_file, _ = _download_object_to_temp_file(client, bucket, object_key)
-    temp_path = Path(temp_file.name)
-    temp_file.close()
-
-    try:
-        result = _process_local_csv(temp_path, overrides, preview_row_limit)
-    finally:
-        temp_path.unlink(missing_ok=True)
+    staged_path, _ = _get_staged_s3_object_path(client, bucket, object_key)
+    result = _process_local_csv(staged_path, overrides, preview_row_limit)
 
     return {
         "bucket": bucket,
         "objectKey": object_key,
         **result,
-        "objectKey": object_key,
     }
 
 
@@ -533,22 +666,16 @@ def _process_excel(
     overrides: dict[str, str],
     preview_row_limit: int,
 ) -> dict[str, Any]:
-    temp_file, _ = _download_object_to_temp_file(
+    staged_path, _ = _get_staged_s3_object_path(
         client,
         bucket,
         object_key,
         max_size_bytes=MAX_EXCEL_SIZE_BYTES,
     )
-    temp_path = Path(temp_file.name)
-    temp_file.close()
-
-    try:
-        df, selected_sheet = _load_local_excel_dataframe(
-            temp_path,
-            sheet_name,
-        )
-    finally:
-        temp_path.unlink(missing_ok=True)
+    df, selected_sheet = _load_local_excel_dataframe(
+        staged_path,
+        sheet_name,
+    )
 
     result = process_dataframe(
         df,
