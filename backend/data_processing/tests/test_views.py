@@ -1,3 +1,5 @@
+"""API-level regression tests for the data-processing endpoints."""
+
 from unittest.mock import patch
 
 from django.test import TestCase
@@ -8,7 +10,11 @@ from data_processing.services.processing import InvalidCredentialsError
 
 
 class DataProcessingApiTests(TestCase):
+    """Verify the public API contracts and error handling."""
+
     def setUp(self) -> None:
+        """Prepare a reusable API client and credential payload."""
+
         self.client = APIClient()
         self.credentials_payload = {
             "access_key_id": "access",
@@ -20,6 +26,8 @@ class DataProcessingApiTests(TestCase):
         }
 
     def test_list_files_endpoint_returns_service_results(self) -> None:
+        """Return the file list payload from the service layer unchanged."""
+
         files = [
             {
                 "key": "incoming/sample.csv",
@@ -39,6 +47,8 @@ class DataProcessingApiTests(TestCase):
         self.assertEqual(credentials.prefix, "incoming/")
 
     def test_process_endpoint_persists_processing_run_without_exposing_credentials(self) -> None:
+        """Persist sanitized run metadata without echoing AWS secrets back."""
+
         service_result = {
             "bucket": "demo-bucket",
             "objectKey": "incoming/sample.csv",
@@ -94,6 +104,8 @@ class DataProcessingApiTests(TestCase):
         self.assertNotIn("secret_access_key", response.json())
 
     def test_process_endpoint_returns_service_errors(self) -> None:
+        """Map service-layer credential errors to API responses."""
+
         payload = {
             **self.credentials_payload,
             "object_key": "incoming/sample.csv",
@@ -111,6 +123,8 @@ class DataProcessingApiTests(TestCase):
         self.assertEqual(response.json()["code"], "invalid_credentials")
 
     def test_process_endpoint_returns_invalid_override_errors(self) -> None:
+        """Surface override validation failures as client errors."""
+
         payload = {
             **self.credentials_payload,
             "object_key": "incoming/sample.csv",
@@ -128,6 +142,8 @@ class DataProcessingApiTests(TestCase):
         self.assertEqual(response.json()["code"], "invalid_override")
 
     def test_preview_endpoint_returns_paginated_rows_for_existing_run(self) -> None:
+        """Use the saved processing run when it is still available."""
+
         run = ProcessingRun.objects.create(
             bucket="demo-bucket",
             object_key="incoming/sample.csv",
@@ -186,6 +202,8 @@ class DataProcessingApiTests(TestCase):
         self.assertEqual(mocked_preview.call_args.kwargs["row_count"], 4)
 
     def test_preview_endpoint_falls_back_to_request_context_when_run_is_missing(self) -> None:
+        """Keep paging working in stateless deployments when runs disappear."""
+
         payload = {
             **self.credentials_payload,
             "run_id": 999,
@@ -236,6 +254,8 @@ class DataProcessingApiTests(TestCase):
         self.assertEqual(mocked_preview.call_args.kwargs["row_count"], 4)
 
     def test_preview_endpoint_returns_not_found_for_missing_run(self) -> None:
+        """Return 404 when neither a saved run nor preview context is available."""
+
         payload = {
             **self.credentials_payload,
             "run_id": 999,

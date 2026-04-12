@@ -1,3 +1,5 @@
+"""Root URL configuration for the Django project."""
+
 from django.contrib import admin
 from django.urls import include, path, re_path
 
@@ -9,4 +11,3 @@ urlpatterns = [
     path("api/", include("data_processing.urls")),
     re_path(r"^(?!static/).*$", frontend_app),
 ]
-

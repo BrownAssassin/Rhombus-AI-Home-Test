@@ -1,3 +1,5 @@
+"""Column profiling, inference, conversion, and preview serialization helpers."""
+
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
@@ -47,6 +49,8 @@ LARGE_SAMPLE_CATEGORY_MAX_RATIO = 0.2
 
 @dataclass
 class ColumnProfile:
+    """Rolling evidence gathered for one column during profiling."""
+
     name: str
     total_count: int = 0
     non_null_count: int = 0
@@ -63,6 +67,8 @@ class ColumnProfile:
     unique_values: set[str] | None = None
 
     def __post_init__(self) -> None:
+        """Initialize mutable defaults without sharing state across profiles."""
+
         if self.sample_values is None:
             self.sample_values = []
         if self.unique_values is None:
@@ -70,11 +76,15 @@ class ColumnProfile:
 
     @property
     def unique_count(self) -> int:
+        """Return the number of unique non-null values sampled for the column."""
+
         return len(self.unique_values)
 
 
 @dataclass
 class ColumnInference:
+    """Serializable schema metadata exposed to the API and frontend."""
+
     column: str
     inferred_type: str
     storage_type: str
@@ -87,10 +97,14 @@ class ColumnInference:
     allowed_overrides: list[str]
 
     def to_dict(self) -> dict[str, Any]:
+        """Convert the dataclass to the API payload shape."""
+
         return asdict(self)
 
 
 def normalize_scalar(value: Any) -> str | None:
+    """Normalize scalars to stripped strings while honoring known null tokens."""
+
     if value is None or pd.isna(value):
         return None
 
@@ -101,12 +115,16 @@ def normalize_scalar(value: Any) -> str | None:
 
 
 def normalize_numeric_text(value: str) -> str:
+    """Remove grouping separators from well-formed numeric strings."""
+
     if GROUPED_NUMBER_RE.match(value):
         return value.replace(",", "")
     return value
 
 
 def parse_decimal(value: str) -> Decimal | None:
+    """Parse a numeric string into Decimal without losing integer checks."""
+
     cleaned = normalize_numeric_text(value)
     try:
         return Decimal(cleaned)
@@ -115,6 +133,8 @@ def parse_decimal(value: str) -> Decimal | None:
 
 
 def parse_bool_token(value: str) -> bool | None:
+    """Recognize the supported boolean tokens."""
+
     lowered = value.casefold()
     if lowered in BOOL_TRUE_TOKENS:
         return True
@@ -124,6 +144,8 @@ def parse_bool_token(value: str) -> bool | None:
 
 
 def parse_datetime_candidate(value: str) -> tuple[bool, bool, bool]:
+    """Detect parseable datetime text and flag ambiguous short dates."""
+
     if not DATE_HINT_RE.search(value):
         return False, False, False
 
@@ -152,6 +174,8 @@ def parse_datetime_candidate(value: str) -> tuple[bool, bool, bool]:
 
 
 def parse_complex_candidate(value: str) -> bool:
+    """Return whether a value cleanly parses as a complex number literal."""
+
     if "j" not in value.casefold():
         return False
     try:
@@ -162,10 +186,14 @@ def parse_complex_candidate(value: str) -> bool:
 
 
 def create_profiles(columns: Iterable[str]) -> dict[str, ColumnProfile]:
+    """Create empty column profiles in source column order."""
+
     return {column: ColumnProfile(name=column) for column in columns}
 
 
 def update_profiles_from_dataframe(profiles: dict[str, ColumnProfile], df: pd.DataFrame) -> None:
+    """Update column profiles from one dataframe or chunk of raw string values."""
+
     for column in df.columns:
         profile = profiles.setdefault(column, ColumnProfile(name=column))
         for raw_value in df[column].array:
@@ -210,6 +238,8 @@ def update_profiles_from_dataframe(profiles: dict[str, ColumnProfile], df: pd.Da
 
 
 def build_column_inference(profile: ColumnProfile) -> ColumnInference:
+    """Translate a column profile into the user-facing inferred schema entry."""
+
     warnings: list[str] = []
     inferred_type = "text"
     confidence = 0.45
@@ -277,20 +307,28 @@ def build_column_inference(profile: ColumnProfile) -> ColumnInference:
 
 
 def infer_profiles(profiles: dict[str, ColumnProfile]) -> list[dict[str, Any]]:
+    """Infer the full schema from already-collected column profiles."""
+
     return [build_column_inference(profile).to_dict() for profile in profiles.values()]
 
 
 def profile_dataframe(df: pd.DataFrame) -> dict[str, ColumnProfile]:
+    """Profile an in-memory dataframe in one pass."""
+
     profiles = create_profiles(df.columns)
     update_profiles_from_dataframe(profiles, df.astype("string"))
     return profiles
 
 
 def infer_dataframe(df: pd.DataFrame) -> list[dict[str, Any]]:
+    """Infer a schema directly from an in-memory dataframe."""
+
     return infer_profiles(profile_dataframe(df))
 
 
 def can_profile_convert_to(profile: ColumnProfile, target_type: str) -> bool:
+    """Return whether a manual override can be applied without lossy coercion."""
+
     if target_type in {"text", "category"}:
         return True
     if target_type == "integer":
@@ -311,6 +349,8 @@ def validate_overrides(
     schema: list[dict[str, Any]],
     overrides: dict[str, str],
 ) -> list[dict[str, Any]]:
+    """Apply validated overrides to an inferred schema payload."""
+
     schema_by_column = {item["column"]: dict(item) for item in schema}
     for column, target_type in overrides.items():
         if column not in profiles:
@@ -344,6 +384,8 @@ def validate_overrides(
 
 
 def _parse_datetime_series(normalized: pd.Series, series_name: str) -> pd.Series:
+    """Parse a normalized series as datetimes and reject invalid values."""
+
     dt_series = pd.to_datetime(normalized, errors="coerce")
     invalid = normalized.notna() & dt_series.isna()
     if invalid.any():
@@ -352,6 +394,8 @@ def _parse_datetime_series(normalized: pd.Series, series_name: str) -> pd.Series
 
 
 def convert_series(series: pd.Series, target_type: str) -> pd.Series:
+    """Convert one series to the requested logical target type."""
+
     normalized = series.map(normalize_scalar)
 
     if target_type == "text":
@@ -394,6 +438,8 @@ def convert_series(series: pd.Series, target_type: str) -> pd.Series:
 
 
 def convert_dataframe(df: pd.DataFrame, schema: list[dict[str, Any]]) -> pd.DataFrame:
+    """Convert a dataframe according to the inferred or overridden schema."""
+
     converted = pd.DataFrame(index=df.index)
     for item in schema:
         column = item["column"]
@@ -402,6 +448,8 @@ def convert_dataframe(df: pd.DataFrame, schema: list[dict[str, Any]]) -> pd.Data
 
 
 def serialize_scalar(value: Any, *, target_type: str | None = None) -> Any:
+    """Serialize pandas and numpy scalars into JSON-friendly preview values."""
+
     if value is None or pd.isna(value):
         return None
     if isinstance(value, pd.Timestamp):
@@ -424,6 +472,8 @@ def dataframe_preview(
     *,
     schema: list[dict[str, Any]] | None = None,
 ) -> tuple[list[str], list[dict[str, Any]]]:
+    """Serialize the first preview rows for API responses and CLI output."""
+
     preview_df = df.head(limit)
     target_types = {item["column"]: item["inferred_type"] for item in schema or []}
     rows = []

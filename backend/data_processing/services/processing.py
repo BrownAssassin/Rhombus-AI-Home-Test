@@ -1,3 +1,5 @@
+"""Shared processing services for S3-backed dataset profiling and previewing."""
+
 from __future__ import annotations
 
 from collections import OrderedDict
@@ -41,42 +43,58 @@ RESOURCE_LIMIT_MESSAGE = (
 
 
 class ProcessingServiceError(Exception):
+    """Base class for service-layer errors that map cleanly to API responses."""
+
     status_code = 400
     code = "processing_error"
 
 
 class InvalidCredentialsError(ProcessingServiceError):
+    """Raised when AWS credentials cannot access the requested bucket/object."""
+
     status_code = 401
     code = "invalid_credentials"
 
 
 class S3AccessError(ProcessingServiceError):
+    """Raised when the requested bucket, object, or sheet cannot be reached."""
+
     status_code = 404
     code = "s3_access_error"
 
 
 class UnsupportedFileTypeError(ProcessingServiceError):
+    """Raised when a file extension falls outside the supported formats."""
+
     status_code = 400
     code = "unsupported_file_type"
 
 
 class FileTooLargeError(ProcessingServiceError):
+    """Raised when an Excel file exceeds the MVP memory guardrail."""
+
     status_code = 413
     code = "file_too_large"
 
 
 class InvalidPreviewPageError(ProcessingServiceError):
+    """Raised when a preview-page request falls outside the dataset bounds."""
+
     status_code = 400
     code = "invalid_preview_page"
 
 
 class ResourceLimitError(ProcessingServiceError):
+    """Raised when the runtime exhausts memory or similar processing limits."""
+
     status_code = 413
     code = "resource_limit_exceeded"
 
 
 @dataclass
 class S3Credentials:
+    """Runtime S3 credentials and bucket context supplied by the user."""
+
     access_key_id: str
     secret_access_key: str
     region: str
@@ -87,20 +105,37 @@ class S3Credentials:
 
 @dataclass(frozen=True)
 class S3ObjectMetadata:
+    """Stable object metadata used to validate staged-file reuse."""
+
     content_length: int
     etag: str
 
 
 @dataclass
 class StagedFileCacheEntry:
+    """Cached local copy of an S3 object plus the metadata that validated it."""
+
     path: Path
     content_length: int
     etag: str
     cached_at: float
 
 
+@dataclass(frozen=True)
+class StagedFileLease:
+    """Local staged-file handle that knows whether it must be cleaned up."""
+
+    path: Path
+    content_length: int
+    release_when_done: bool = False
+
+
 class StagedFileCache:
+    """Small disk cache for recently staged S3 objects."""
+
     def __init__(self, *, max_items: int, ttl_seconds: int) -> None:
+        """Create a bounded cache for staged S3 files."""
+
         self.max_items = max_items
         self.ttl_seconds = ttl_seconds
         # A tiny disk-backed cache keeps the single-instance deployment from
@@ -109,12 +144,16 @@ class StagedFileCache:
         self._lock = threading.Lock()
 
     def clear(self) -> None:
+        """Remove every staged file currently tracked by the cache."""
+
         with self._lock:
             for entry in self._entries.values():
                 entry.path.unlink(missing_ok=True)
             self._entries.clear()
 
     def get(self, bucket: str, object_key: str, *, metadata: S3ObjectMetadata) -> Path | None:
+        """Return a still-valid staged file for the object, if one exists."""
+
         cache_key = (bucket, object_key)
         now = time.time()
         with self._lock:
@@ -133,6 +172,8 @@ class StagedFileCache:
             return entry.path
 
     def put(self, bucket: str, object_key: str, *, metadata: S3ObjectMetadata, path: Path) -> Path:
+        """Store a freshly staged file and evict older entries if needed."""
+
         cache_key = (bucket, object_key)
         entry = StagedFileCacheEntry(
             path=path,
@@ -151,6 +192,8 @@ class StagedFileCache:
         return path
 
     def _purge_expired_locked(self, now: float) -> None:
+        """Drop expired or missing cache entries while the lock is held."""
+
         if self.ttl_seconds <= 0:
             while self._entries:
                 self._remove_entry_locked(next(iter(self._entries)))
@@ -162,10 +205,14 @@ class StagedFileCache:
                 self._remove_entry_locked(cache_key)
 
     def _evict_overflow_locked(self) -> None:
+        """Enforce the configured max entry count while the lock is held."""
+
         while len(self._entries) > self.max_items:
             self._remove_entry_locked(next(iter(self._entries)))
 
     def _remove_entry_locked(self, cache_key: tuple[str, str]) -> None:
+        """Remove one cached entry and delete its staged file if present."""
+
         entry = self._entries.pop(cache_key, None)
         if entry is not None:
             entry.path.unlink(missing_ok=True)
@@ -178,6 +225,8 @@ STAGED_FILE_CACHE = StagedFileCache(
 
 
 def build_s3_client(credentials: S3Credentials):
+    """Build a boto3 client from request-scoped credentials."""
+
     session = boto3.session.Session(
         aws_access_key_id=credentials.access_key_id,
         aws_secret_access_key=credentials.secret_access_key,
@@ -188,6 +237,8 @@ def build_s3_client(credentials: S3Credentials):
 
 
 def map_client_error(exc: ClientError) -> ProcessingServiceError:
+    """Translate AWS client errors into stable API-facing service errors."""
+
     code = exc.response.get("Error", {}).get("Code", "")
     if code in {"InvalidAccessKeyId", "SignatureDoesNotMatch", "AccessDenied", "ExpiredToken"}:
         return InvalidCredentialsError("AWS credentials could not be validated.")
@@ -197,6 +248,8 @@ def map_client_error(exc: ClientError) -> ProcessingServiceError:
 
 
 def list_supported_files(credentials: S3Credentials) -> list[dict[str, Any]]:
+    """List supported CSV and Excel objects for the selected bucket/prefix."""
+
     client = build_s3_client(credentials)
     paginator = client.get_paginator("list_objects_v2")
     files: list[dict[str, Any]] = []
@@ -226,6 +279,8 @@ def list_supported_files(credentials: S3Credentials) -> list[dict[str, Any]]:
 
 
 def resolve_supported_file_type(file_name: str) -> str:
+    """Map a supported filename extension to the internal file-type label."""
+
     extension = Path(file_name).suffix.lower()
     if extension not in SUPPORTED_EXTENSIONS:
         raise UnsupportedFileTypeError("Only CSV, XLS, and XLSX files are supported.")
@@ -233,6 +288,8 @@ def resolve_supported_file_type(file_name: str) -> str:
 
 
 def build_schema_from_profiles(profiles, overrides: dict[str, str]) -> tuple[list[dict[str, Any]], list[str]]:
+    """Infer the schema and flatten any per-column warnings into one list."""
+
     schema = infer_profiles(profiles)
     schema = validate_overrides(profiles, schema, overrides)
     warnings = sorted({warning for item in schema for warning in item["warnings"]})
@@ -240,10 +297,14 @@ def build_schema_from_profiles(profiles, overrides: dict[str, str]) -> tuple[lis
 
 
 def clear_staged_file_cache() -> None:
+    """Remove any staged S3 files kept on disk for reuse."""
+
     STAGED_FILE_CACHE.clear()
 
 
 def _build_preview_page_metadata(row_count: int, page: int, page_size: int) -> dict[str, Any]:
+    """Return stable preview-page metadata for the requested slice."""
+
     total_pages = max(1, (row_count + page_size - 1) // page_size) if row_count else 1
     if page > total_pages:
         raise InvalidPreviewPageError("The requested preview page is outside the available row range.")
@@ -264,6 +325,8 @@ def _convert_preview_slice(
     *,
     limit: int,
 ) -> tuple[list[str], list[dict[str, Any]]]:
+    """Convert only the rows needed for the current preview slice."""
+
     if limit <= 0 or df.empty:
         return [item["column"] for item in schema], []
 
@@ -279,6 +342,8 @@ def _capture_preview_frame(
     collected_rows: int,
     preview_row_limit: int,
 ) -> int:
+    """Retain only the raw rows needed to build the initial preview page."""
+
     if collected_rows >= preview_row_limit or chunk.empty:
         return collected_rows
 
@@ -296,6 +361,8 @@ def _paginate_converted_chunks(
     page: int,
     page_size: int,
 ) -> tuple[list[str], list[dict[str, Any]]]:
+    """Convert just the requested page while streaming through CSV chunks."""
+
     start = (page - 1) * page_size
     end = start + page_size
     seen_rows = 0
@@ -333,6 +400,8 @@ def process_dataframe(
     object_key: str = "",
     selected_sheet: str = "",
 ) -> dict[str, Any]:
+    """Process an in-memory dataframe and return schema plus preview payloads."""
+
     profiles = create_profiles(df.columns)
     update_profiles_from_dataframe(profiles, df)
     schema, warnings = build_schema_from_profiles(profiles, overrides or {})
@@ -359,6 +428,8 @@ def _head_object_metadata(
     *,
     max_size_bytes: int | None = None,
 ) -> S3ObjectMetadata:
+    """Load object metadata and enforce optional size limits before staging."""
+
     try:
         head = client.head_object(Bucket=bucket, Key=object_key)
     except ClientError as exc:
@@ -386,6 +457,8 @@ def _download_object_to_temp_file(
     metadata: S3ObjectMetadata | None = None,
     max_size_bytes: int | None = None,
 ) -> tuple[Path, int]:
+    """Stage an S3 object to a local temp file for deterministic processing."""
+
     temp_file: tempfile.NamedTemporaryFile | None = None
 
     def cleanup_temp_file() -> None:
@@ -429,16 +502,31 @@ def _get_staged_s3_object_path(
     object_key: str,
     *,
     max_size_bytes: int | None = None,
-) -> tuple[Path, int]:
+) -> StagedFileLease:
+    """Return a staged-file lease, reusing the cache only when enabled."""
+
     metadata = _head_object_metadata(
         client,
         bucket,
         object_key,
         max_size_bytes=max_size_bytes,
     )
+    if STAGED_FILE_CACHE.max_items <= 0:
+        temp_path, _ = _download_object_to_temp_file(
+            client,
+            bucket,
+            object_key,
+            metadata=metadata,
+        )
+        return StagedFileLease(
+            path=temp_path,
+            content_length=metadata.content_length,
+            release_when_done=True,
+        )
+
     cached_path = STAGED_FILE_CACHE.get(bucket, object_key, metadata=metadata)
     if cached_path is not None:
-        return cached_path, metadata.content_length
+        return StagedFileLease(path=cached_path, content_length=metadata.content_length)
 
     temp_path, _ = _download_object_to_temp_file(
         client,
@@ -446,10 +534,20 @@ def _get_staged_s3_object_path(
         object_key,
         metadata=metadata,
     )
-    return STAGED_FILE_CACHE.put(bucket, object_key, metadata=metadata, path=temp_path), metadata.content_length
+    cached_path = STAGED_FILE_CACHE.put(bucket, object_key, metadata=metadata, path=temp_path)
+    return StagedFileLease(path=cached_path, content_length=metadata.content_length)
+
+
+def _release_staged_file(lease: StagedFileLease) -> None:
+    """Clean up request-scoped staged files when cache reuse is disabled."""
+
+    if lease.release_when_done:
+        lease.path.unlink(missing_ok=True)
 
 
 def _read_local_csv_chunks(file_path: Path) -> Iterator[pd.DataFrame]:
+    """Yield CSV chunks as strings so inference can control all conversions."""
+
     try:
         yield from pd.read_csv(
             file_path,
@@ -465,6 +563,8 @@ def _read_local_csv_chunks(file_path: Path) -> Iterator[pd.DataFrame]:
 
 
 def _fetch_local_csv_columns(file_path: Path) -> list[str]:
+    """Read just the header row to preserve source column ordering."""
+
     try:
         return list(pd.read_csv(file_path, dtype=str, keep_default_na=False, na_filter=False, nrows=0).columns)
     except MemoryError as exc:
@@ -482,6 +582,8 @@ def _fetch_local_csv_preview_page(
     page_size: int,
     preview_columns: list[str] | None = None,
 ) -> dict[str, Any]:
+    """Load one processed CSV preview page from a staged local file."""
+
     preview_page = _build_preview_page_metadata(row_count, page=page, page_size=page_size)
     page_columns = preview_columns or [item["column"] for item in schema]
     if row_count == 0:
@@ -507,6 +609,8 @@ def _fetch_local_csv_preview_page(
 
 
 def _load_local_excel_dataframe(file_path: Path, sheet_name: str) -> tuple[pd.DataFrame, str]:
+    """Load an Excel sheet into memory after enforcing the MVP size guardrail."""
+
     if file_path.stat().st_size > MAX_EXCEL_SIZE_BYTES:
         raise FileTooLargeError(
             f"Excel files larger than {MAX_EXCEL_SIZE_BYTES // (1024 * 1024)} MB are rejected in this MVP."
@@ -536,6 +640,8 @@ def process_s3_object(
     overrides: dict[str, str] | None = None,
     preview_row_limit: int = 100,
 ) -> dict[str, Any]:
+    """Process an S3 object and return the first preview page plus schema."""
+
     try:
         file_type = resolve_supported_file_type(object_key)
 
@@ -570,33 +676,41 @@ def fetch_s3_preview_page(
     page_size: int,
     preview_columns: list[str] | None = None,
 ) -> dict[str, Any]:
+    """Fetch a later processed preview page for the current file context."""
+
     try:
         client = build_s3_client(credentials)
         if file_type == "csv":
-            staged_path, _ = _get_staged_s3_object_path(client, credentials.bucket, object_key)
-            return _fetch_local_csv_preview_page(
-                staged_path,
-                schema=schema,
-                row_count=row_count,
-                page=page,
-                page_size=page_size,
-                preview_columns=preview_columns,
-            )
+            staged_file = _get_staged_s3_object_path(client, credentials.bucket, object_key)
+            try:
+                return _fetch_local_csv_preview_page(
+                    staged_file.path,
+                    schema=schema,
+                    row_count=row_count,
+                    page=page,
+                    page_size=page_size,
+                    preview_columns=preview_columns,
+                )
+            finally:
+                _release_staged_file(staged_file)
         else:
-            staged_path, _ = _get_staged_s3_object_path(
+            staged_file = _get_staged_s3_object_path(
                 client,
                 credentials.bucket,
                 object_key,
                 max_size_bytes=MAX_EXCEL_SIZE_BYTES,
             )
-            df, _ = _load_local_excel_dataframe(staged_path, selected_sheet)
+            try:
+                df, _ = _load_local_excel_dataframe(staged_file.path, selected_sheet)
 
-            preview_page = _build_preview_page_metadata(row_count, page=page, page_size=page_size)
-            page_columns, page_rows = _convert_preview_slice(
-                df.iloc[(page - 1) * page_size : page * page_size],
-                schema,
-                limit=page_size,
-            )
+                preview_page = _build_preview_page_metadata(row_count, page=page, page_size=page_size)
+                page_columns, page_rows = _convert_preview_slice(
+                    df.iloc[(page - 1) * page_size : page * page_size],
+                    schema,
+                    limit=page_size,
+                )
+            finally:
+                _release_staged_file(staged_file)
 
         return {
             "previewColumns": page_columns or preview_columns or [item["column"] for item in schema],
@@ -615,6 +729,8 @@ def process_local_file(
     overrides: dict[str, str] | None = None,
     preview_row_limit: int = 100,
 ) -> dict[str, Any]:
+    """Process a local CSV or Excel file through the shared service layer."""
+
     path = Path(file_path)
     if not path.exists():
         raise ProcessingServiceError(f"Local file '{path}' does not exist.")
@@ -648,14 +764,18 @@ def process_local_file(
 
 
 def _process_csv(client, bucket: str, object_key: str, overrides: dict[str, str], preview_row_limit: int) -> dict[str, Any]:
-    staged_path, _ = _get_staged_s3_object_path(client, bucket, object_key)
-    result = _process_local_csv(staged_path, overrides, preview_row_limit)
+    """Process a staged S3 CSV through the local chunked CSV pipeline."""
 
-    return {
-        "bucket": bucket,
-        "objectKey": object_key,
-        **result,
-    }
+    staged_file = _get_staged_s3_object_path(client, bucket, object_key)
+    try:
+        result = _process_local_csv(staged_file.path, overrides, preview_row_limit)
+        return {
+            "bucket": bucket,
+            "objectKey": object_key,
+            **result,
+        }
+    finally:
+        _release_staged_file(staged_file)
 
 
 def _process_excel(
@@ -666,32 +786,39 @@ def _process_excel(
     overrides: dict[str, str],
     preview_row_limit: int,
 ) -> dict[str, Any]:
-    staged_path, _ = _get_staged_s3_object_path(
+    """Process a staged S3 Excel file through the in-memory Excel path."""
+
+    staged_file = _get_staged_s3_object_path(
         client,
         bucket,
         object_key,
         max_size_bytes=MAX_EXCEL_SIZE_BYTES,
     )
-    df, selected_sheet = _load_local_excel_dataframe(
-        staged_path,
-        sheet_name,
-    )
+    try:
+        df, selected_sheet = _load_local_excel_dataframe(
+            staged_file.path,
+            sheet_name,
+        )
 
-    result = process_dataframe(
-        df,
-        overrides=overrides,
-        preview_row_limit=preview_row_limit,
-        file_type="excel",
-        object_key=object_key,
-        selected_sheet=selected_sheet,
-    )
-    return {
-        "bucket": bucket,
-        **result,
-    }
+        result = process_dataframe(
+            df,
+            overrides=overrides,
+            preview_row_limit=preview_row_limit,
+            file_type="excel",
+            object_key=object_key,
+            selected_sheet=selected_sheet,
+        )
+        return {
+            "bucket": bucket,
+            **result,
+        }
+    finally:
+        _release_staged_file(staged_file)
 
 
 def _process_local_csv(file_path: Path, overrides: dict[str, str], preview_row_limit: int) -> dict[str, Any]:
+    """Infer schema from a local CSV while keeping preview work bounded."""
+
     columns = _fetch_local_csv_columns(file_path)
     profiles = create_profiles(columns)
     row_count = 0

@@ -1,3 +1,5 @@
+"""Container startup entrypoint for migrations plus Gunicorn launch."""
+
 from __future__ import annotations
 
 import os
@@ -6,6 +8,8 @@ import sys
 
 
 def main() -> int:
+    """Run migrations once, then hand off the process to Gunicorn."""
+
     subprocess.run([sys.executable, "manage.py", "migrate", "--noinput"], check=True)
     # Render injects the listening port at runtime, so Gunicorn must bind to
     # that value after the one-time startup tasks complete.

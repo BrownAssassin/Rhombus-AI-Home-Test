@@ -1,3 +1,5 @@
+"""API views for S3 browsing, processing, and preview pagination."""
+
 from __future__ import annotations
 
 from rest_framework import status
@@ -20,6 +22,8 @@ from .services.processing import (
 
 
 def _build_credentials(validated_data: dict) -> S3Credentials:
+    """Build service-layer credentials from validated request data."""
+
     return S3Credentials(
         access_key_id=validated_data["access_key_id"],
         secret_access_key=validated_data["secret_access_key"],
@@ -31,6 +35,8 @@ def _build_credentials(validated_data: dict) -> S3Credentials:
 
 
 def _build_preview_context(validated_data: dict) -> dict | None:
+    """Reconstruct preview context when the saved run is unavailable."""
+
     required_fields = ("object_key", "file_type", "row_count", "schema")
     if not all(field in validated_data for field in required_fields):
         return None
@@ -46,18 +52,26 @@ def _build_preview_context(validated_data: dict) -> dict | None:
 
 
 class HealthCheckView(APIView):
+    """Minimal health check used by local smoke tests and Render."""
+
     authentication_classes = []
     permission_classes = []
 
     def get(self, request):
+        """Return a stable liveness payload."""
+
         return Response({"status": "ok"})
 
 
 class S3FileListView(APIView):
+    """List supported files from the requested S3 bucket or prefix."""
+
     authentication_classes = []
     permission_classes = []
 
     def post(self, request):
+        """Validate credentials and return supported S3 objects."""
+
         serializer = ListFilesRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         credentials = _build_credentials(serializer.validated_data)
@@ -74,10 +88,14 @@ class S3FileListView(APIView):
 
 
 class ProcessDataView(APIView):
+    """Process a selected S3 object and persist sanitized run metadata."""
+
     authentication_classes = []
     permission_classes = []
 
     def post(self, request):
+        """Infer the schema, persist the run, and return the first preview page."""
+
         serializer = ProcessFileRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         validated_data = serializer.validated_data
@@ -133,10 +151,14 @@ class ProcessDataView(APIView):
 
 
 class PreviewPageView(APIView):
+    """Load a later processed preview page for the current file context."""
+
     authentication_classes = []
     permission_classes = []
 
     def post(self, request):
+        """Page through processed rows using a saved run or stateless preview context."""
+
         serializer = PreviewPageRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         validated_data = serializer.validated_data

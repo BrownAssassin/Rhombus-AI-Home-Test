@@ -1,11 +1,13 @@
+"""Service-level regression tests for the processing pipeline."""
+
 from datetime import datetime, timezone
-import io
 from pathlib import Path
 import tempfile
 from unittest.mock import patch
 
 from django.test import SimpleTestCase
 
+import data_processing.services.processing as processing_service
 from data_processing.services.processing import (
     CSV_CHUNK_SIZE,
     S3Credentials,
@@ -18,39 +20,56 @@ from data_processing.services.processing import (
 
 
 class FakePaginator:
+    """Minimal paginator stub for list_objects_v2 tests."""
+
     def __init__(self, pages):
+        """Store the pages returned by paginate()."""
+
         self.pages = pages
 
     def paginate(self, **kwargs):
+        """Return the configured paginator pages."""
+
         return self.pages
 
 
 class FakeS3Client:
+    """Small S3 client stub for staging, listing, and preview tests."""
+
     def __init__(self, *, objects=None, pages=None):
+        """Configure fake S3 objects and paginator pages."""
+
         self.objects = objects or {}
         self.pages = pages or []
         self.head_calls = 0
         self.download_calls = 0
 
     def get_paginator(self, name: str):
+        """Return the fake list_objects paginator."""
+
         if name != "list_objects_v2":
             raise AssertionError(f"Unexpected paginator requested: {name}")
         return FakePaginator(self.pages)
 
-    def get_object(self, Bucket: str, Key: str):
-        return {"Body": io.BytesIO(self.objects[Key])}
-
     def head_object(self, Bucket: str, Key: str):
+        """Return stable object metadata for the requested fake object."""
+
         self.head_calls += 1
         return {"ContentLength": len(self.objects[Key]), "ETag": '"demo-etag"'}
 
     def download_fileobj(self, Bucket: str, Key: str, fileobj):
+        """Write the requested fake object into the supplied file object."""
+
         self.download_calls += 1
         fileobj.write(self.objects[Key])
 
 
 class ProcessingServiceTests(SimpleTestCase):
+    """Verify local and S3-backed processing behavior."""
+
     def setUp(self) -> None:
+        """Prepare clean staged-file state and shared fake credentials."""
+
         clear_staged_file_cache()
         self.addCleanup(clear_staged_file_cache)
         self.credentials = S3Credentials(
@@ -62,6 +81,8 @@ class ProcessingServiceTests(SimpleTestCase):
         )
 
     def test_list_supported_files_filters_and_sorts_objects(self) -> None:
+        """Return only supported files and keep them sorted by key."""
+
         fake_client = FakeS3Client(
             pages=[
                 {
@@ -94,6 +115,8 @@ class ProcessingServiceTests(SimpleTestCase):
         self.assertEqual(files[1]["format"], "excel")
 
     def test_process_s3_object_returns_preview_and_processing_metadata(self) -> None:
+        """Process S3 CSVs and include preview plus processing metadata."""
+
         fake_client = FakeS3Client(
             objects={
                 "incoming/sample.csv": (
@@ -116,6 +139,8 @@ class ProcessingServiceTests(SimpleTestCase):
         self.assertEqual(schema["Score"]["inferred_type"], "integer")
 
     def test_process_local_file_supports_preview_limit(self) -> None:
+        """Respect the requested preview-row limit for local CSVs."""
+
         with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, encoding="utf-8", newline="") as handle:
             handle.write("Name,Score\nAlice,90\nBob,85\nCharlie,80\n")
             csv_path = Path(handle.name)
@@ -130,6 +155,8 @@ class ProcessingServiceTests(SimpleTestCase):
         self.assertEqual(result["previewColumns"], ["Name", "Score"])
 
     def test_process_local_file_formats_date_and_datetime_previews_distinctly(self) -> None:
+        """Render date-only overrides differently from full datetimes in previews."""
+
         with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, encoding="utf-8", newline="") as handle:
             handle.write("MeetingDay,OccurredAt\n1990-01-01 15:30:00,1990-01-01 15:30:00\n")
             csv_path = Path(handle.name)
@@ -149,6 +176,8 @@ class ProcessingServiceTests(SimpleTestCase):
         self.assertEqual(result["previewRows"][0]["OccurredAt"], "1990-01-01T15:30:00")
 
     def test_fetch_s3_preview_page_uses_stored_schema_for_requested_page(self) -> None:
+        """Page through processed S3 data using the provided schema context."""
+
         fake_client = FakeS3Client(
             objects={
                 "incoming/sample.csv": (
@@ -205,6 +234,8 @@ class ProcessingServiceTests(SimpleTestCase):
         self.assertEqual(preview["previewRows"], [{"Name": "Charlie", "Score": 80}, {"Name": "David", "Score": 75}])
 
     def test_csv_staging_cache_reuses_downloaded_object_for_follow_up_preview(self) -> None:
+        """Reuse one staged CSV across initial processing and later paging."""
+
         fake_client = FakeS3Client(
             objects={
                 "incoming/sample.csv": (
@@ -232,4 +263,39 @@ class ProcessingServiceTests(SimpleTestCase):
             )
 
         self.assertEqual(fake_client.download_calls, 1)
+        self.assertEqual(preview["previewRows"], [{"Name": "Charlie", "Score": 80}, {"Name": "David", "Score": 75}])
+
+    def test_csv_staging_cache_can_be_disabled_without_breaking_follow_up_preview(self) -> None:
+        """Support disabling staged-file reuse without breaking preview paging."""
+
+        fake_client = FakeS3Client(
+            objects={
+                "incoming/sample.csv": (
+                    b"Name,Score\n"
+                    b"Alice,90\n"
+                    b"Bob,85\n"
+                    b"Charlie,80\n"
+                    b"David,75\n"
+                )
+            }
+        )
+
+        with (
+            patch("data_processing.services.processing.build_s3_client", return_value=fake_client),
+            patch.object(processing_service.STAGED_FILE_CACHE, "max_items", 0),
+        ):
+            result = process_s3_object(self.credentials, "incoming/sample.csv", preview_row_limit=2)
+            preview = fetch_s3_preview_page(
+                credentials=self.credentials,
+                object_key="incoming/sample.csv",
+                file_type="csv",
+                selected_sheet="",
+                schema=result["schema"],
+                row_count=result["rowCount"],
+                page=2,
+                page_size=2,
+                preview_columns=result["previewColumns"],
+            )
+
+        self.assertEqual(fake_client.download_calls, 2)
         self.assertEqual(preview["previewRows"], [{"Name": "Charlie", "Score": 80}, {"Name": "David", "Score": 75}])

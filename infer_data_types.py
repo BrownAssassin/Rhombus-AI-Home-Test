@@ -1,3 +1,5 @@
+"""CLI wrapper around the shared local-file processing service."""
+
 from __future__ import annotations
 
 import argparse
@@ -12,6 +14,8 @@ from data_processing.services.processing import ProcessingServiceError, process_
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Create the command-line interface for local smoke testing."""
+
     parser = argparse.ArgumentParser(description="Infer column types for a local CSV or Excel file.")
     parser.add_argument(
         "path",
@@ -30,6 +34,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def print_schema(result: dict) -> None:
+    """Print the inferred schema in a compact human-readable format."""
+
     print(f"File: {result['objectKey']}")
     print(f"Rows profiled: {result['rowCount']}")
     print("Inferred schema:")
@@ -43,6 +49,8 @@ def print_schema(result: dict) -> None:
 
 
 def print_preview(result: dict) -> None:
+    """Print preview rows using the processed column order."""
+
     if not result["previewRows"]:
         print("No preview rows available.")
         return
@@ -55,6 +63,8 @@ def print_preview(result: dict) -> None:
 
 
 def main() -> int:
+    """Run the CLI and return a shell-friendly exit code."""
+
     parser = build_parser()
     args = parser.parse_args()
 

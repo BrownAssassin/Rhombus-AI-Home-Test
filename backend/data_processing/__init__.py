@@ -1,1 +1,1 @@
-
+"""Data-processing Django app."""

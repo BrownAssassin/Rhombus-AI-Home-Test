@@ -1,8 +1,12 @@
+"""Django settings for the submission-ready single-host deployment."""
+
 import os
 from pathlib import Path
 
 
 def env_bool(name: str, default: bool) -> bool:
+    """Parse boolean-like environment variables with a sensible default."""
+
     value = os.getenv(name)
     if value is None:
         return default
@@ -10,6 +14,8 @@ def env_bool(name: str, default: bool) -> bool:
 
 
 def env_list(name: str, default: list[str]) -> list[str]:
+    """Parse comma-separated environment variables into trimmed lists."""
+
     value = os.getenv(name)
     if value is None:
         return default
@@ -17,6 +23,8 @@ def env_list(name: str, default: list[str]) -> list[str]:
 
 
 def merge_unique(base: list[str], extras: list[str]) -> list[str]:
+    """Append non-empty values while preserving first-seen order."""
+
     merged = list(base)
     for item in extras:
         if item and item not in merged:

@@ -1,7 +1,11 @@
+"""Database models used by the data-processing application."""
+
 from django.db import models
 
 
 class ProcessingRun(models.Model):
+    """Sanitized metadata for one completed processing request."""
+
     STATUS_CHOICES = [
         ("completed", "Completed"),
         ("failed", "Failed"),
@@ -20,8 +24,11 @@ class ProcessingRun(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
+        """Keep the newest processing runs first in the admin and API lookups."""
+
         ordering = ["-created_at"]
 
     def __str__(self) -> str:
-        return f"{self.bucket}/{self.object_key} ({self.created_at:%Y-%m-%d %H:%M:%S})"
+        """Return a readable identifier for the admin and shell."""
 
+        return f"{self.bucket}/{self.object_key} ({self.created_at:%Y-%m-%d %H:%M:%S})"

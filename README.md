@@ -12,6 +12,15 @@ Single-host Django + React application for browsing CSV and Excel files in Amazo
 - Stores sanitized processing metadata in Django without persisting AWS secrets.
 - Exposes a local CLI via `infer_data_types.py` for quick local-file smoke testing.
 
+## Inference and performance approach
+
+- CSV files are staged from S3 onto local disk, then profiled in chunks so larger datasets do not depend on a single long-lived streaming response.
+- Repeated preview-page requests can reuse a small bounded cache of staged S3 files to avoid re-downloading the same CSV on every page change or override.
+- Excel files are supported, but they still load the selected sheet into memory and are capped at 20 MB in this MVP.
+- Type inference is intentionally conservative: ambiguous short dates stay as text unless overridden, and manual overrides are validated to avoid lossy coercion.
+- Date and DateTime are both backed by pandas datetime storage internally, but the preview renders them differently so date-only columns stay calendar-shaped.
+- Category inference is strict for larger datasets and slightly softer for very small repeated-label samples such as grade-like columns.
+
 ## Stack
 
 - Backend: Django 5, Django REST Framework, Pandas, boto3
@@ -145,6 +154,14 @@ Request body:
   "prefix": "incoming/"
 }
 ```
+
+## Project brief alignment
+
+- **Pandas inference and conversion**: the shared backend service profiles and converts CSV/XLS/XLSX data loaded into pandas DataFrames, with explicit handling for object-like mixed columns, dates, numerics, categories, booleans, and complex values.
+- **Large-file handling and tuning**: S3 CSVs are staged locally, profiled in chunks, and paged from the backend. Render tuning knobs such as `WEB_CONCURRENCY`, `GUNICORN_TIMEOUT`, `CSV_CHUNK_SIZE`, and staged-file cache settings are documented below.
+- **Django backend**: the API exposes S3 browsing, file processing, preview pagination, health checks, and persisted sanitized run metadata.
+- **React frontend**: the UI supports S3 connection, file browsing, file processing, schema review, manual overrides, reset/reprocess actions, and processed preview pagination.
+- **Documentation and testing**: the repo includes setup/deploy instructions, backend tests, frontend tests, and a local CLI for smoke testing with sample datasets.
 
 ### `POST /api/data/process`
 
@@ -302,7 +319,9 @@ Render automatically provides `PORT`, `RENDER_EXTERNAL_HOSTNAME`, and `RENDER_EX
 ## Notes and limitations
 
 - AWS credentials are accepted at runtime and are intentionally not stored in the database.
-- CSV handling is chunked after staging the S3 object to a temp file, and repeat requests can reuse a small bounded local cache of staged files to avoid unnecessary re-downloads. Excel handling is capped at 20 MB in this MVP.
+- CSV handling is chunked after staging the S3 object to a temp file, and repeat requests can reuse a small bounded local cache of staged files to avoid unnecessary re-downloads. If you set `STAGED_FILE_CACHE_MAX_ITEMS=0`, staged files are cleaned up after each request instead of being reused.
+- Excel handling is capped at 20 MB in this MVP, and each preview-page request reloads the selected sheet because pandas does not offer the same chunked read path as CSV.
 - Type inference is intentionally conservative. Ambiguous date columns stay as text unless the user overrides them.
+- Small repeated-label columns can infer as `Category`, but high-cardinality or mostly-unique string columns intentionally stay as `Text`.
 - The app supports paginated preview browsing across the processed dataset, but it does not export a full transformed file in this MVP.
 - A Render deployment that keeps SQLite in the container filesystem is suitable for demos, but `ProcessingRun` history resets whenever the service is rebuilt or restarted.
