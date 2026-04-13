@@ -132,6 +132,7 @@ class ProcessingServiceTests(SimpleTestCase):
 
         schema = {item["column"]: item for item in result["schema"]}
         self.assertEqual(result["fileType"], "csv")
+        self.assertEqual(result["objectKey"], "incoming/sample.csv")
         self.assertEqual(result["rowCount"], 2)
         self.assertEqual(len(result["previewRows"]), 1)
         self.assertEqual(result["previewPage"]["totalPages"], 2)

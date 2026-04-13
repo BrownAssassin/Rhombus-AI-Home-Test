@@ -771,8 +771,8 @@ def _process_csv(client, bucket: str, object_key: str, overrides: dict[str, str]
         result = _process_local_csv(staged_file.path, overrides, preview_row_limit)
         return {
             "bucket": bucket,
-            "objectKey": object_key,
             **result,
+            "objectKey": object_key,
         }
     finally:
         _release_staged_file(staged_file)
