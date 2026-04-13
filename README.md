@@ -1,6 +1,17 @@
 # Rhombus-AI-Home-Test
 
+[![Python](https://img.shields.io/badge/Python-3.12-blue)](https://www.python.org/)
+[![Django](https://img.shields.io/badge/Django-5.2-0C4B33)](https://www.djangoproject.com/)
+[![React](https://img.shields.io/badge/React-19-61DAFB)](https://react.dev/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6)](https://www.typescriptlang.org/)
+[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED)](https://www.docker.com/)
+[![Live App](https://img.shields.io/badge/Live%20App-Render-46E3B7)](https://rhombus-ai-home-test.onrender.com/)
+[![License: Unlicense](https://img.shields.io/badge/License-Unlicense-lightgrey)](LICENSE)
+[![Repo Size](https://img.shields.io/github/repo-size/BrownAssassin/Rhombus-AI-Home-Test)](https://github.com/BrownAssassin/Rhombus-AI-Home-Test)
+
 Single-host Django + React application for browsing CSV and Excel files in Amazon S3, inferring Pandas data types, and previewing the processed result with optional column overrides.
+
+Public deployment: `https://rhombus-ai-home-test.onrender.com/`
 
 ## What it does
 
