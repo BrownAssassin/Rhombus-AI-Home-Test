@@ -53,6 +53,20 @@ class ProcessFileRequestSerializer(S3CredentialsSerializer):
     overrides = ColumnOverrideSerializer(many=True, required=False)
 
 
+class ProcessFileAsyncRequestSerializer(ProcessFileRequestSerializer):
+    """Request body for queueing background processing of a selected object."""
+
+    pass
+
+
+class SparkCompareRequestSerializer(S3CredentialsSerializer):
+    """Request body for the experimental Spark CSV comparison mode."""
+
+    object_key = serializers.CharField(max_length=1024, trim_whitespace=True)
+    page = serializers.IntegerField(required=False, min_value=1, default=1)
+    page_size = serializers.IntegerField(required=False, min_value=1, max_value=500, default=100)
+
+
 class PreviewPageRequestSerializer(S3CredentialsSerializer):
     """Request body for loading a later processed preview page."""
 

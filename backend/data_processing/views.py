@@ -5,12 +5,15 @@ from __future__ import annotations
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from django.utils import timezone
 
 from .models import ProcessingRun
 from .serializers import (
     ListFilesRequestSerializer,
     PreviewPageRequestSerializer,
+    ProcessFileAsyncRequestSerializer,
     ProcessFileRequestSerializer,
+    SparkCompareRequestSerializer,
 )
 from .services.processing import (
     ProcessingServiceError,
@@ -18,7 +21,11 @@ from .services.processing import (
     fetch_s3_preview_page,
     list_supported_files,
     process_s3_object,
+    resolve_supported_file_type,
 )
+from .services.run_tracking import mark_run_failed, mark_run_queued, serialize_run
+from .services.spark_processing import run_spark_csv_comparison
+from .tasks import process_s3_object_async
 
 
 def _build_credentials(validated_data: dict) -> S3Credentials:
@@ -49,6 +56,12 @@ def _build_preview_context(validated_data: dict) -> dict | None:
         "schema": validated_data["schema"],
         "preview_columns": validated_data.get("preview_columns", []),
     }
+
+
+def _build_overrides(validated_data: dict) -> dict[str, str]:
+    """Flatten validated override rows into the service-layer mapping."""
+
+    return {item["column"]: item["target_type"] for item in validated_data.get("overrides", [])}
 
 
 class HealthCheckView(APIView):
@@ -100,10 +113,7 @@ class ProcessDataView(APIView):
         serializer.is_valid(raise_exception=True)
         validated_data = serializer.validated_data
         credentials = _build_credentials(validated_data)
-        overrides = {
-            item["column"]: item["target_type"]
-            for item in validated_data.get("overrides", [])
-        }
+        overrides = _build_overrides(validated_data)
 
         try:
             result = process_s3_object(
@@ -127,11 +137,18 @@ class ProcessDataView(APIView):
             file_type=result["fileType"],
             sheet_name=result["selectedSheet"],
             status="completed",
+            engine="pandas",
+            progress_stage="completed",
+            progress_percent=100,
             row_count=result["rowCount"],
             schema=result["schema"],
             warnings=result["warnings"],
             preview_columns=result["previewColumns"],
+            preview_rows=result["previewRows"],
+            preview_page=result["previewPage"],
             processing_metadata=result["processingMetadata"],
+            started_at=timezone.now(),
+            completed_at=timezone.now(),
         )
 
         return Response(
@@ -148,6 +165,119 @@ class ProcessDataView(APIView):
                 "fileType": result["fileType"],
             }
         )
+
+
+class ProcessDataAsyncView(APIView):
+    """Queue background processing while keeping the sync path unchanged."""
+
+    authentication_classes = []
+    permission_classes = []
+
+    def post(self, request):
+        """Validate the request, persist a queued run, and enqueue a Celery task."""
+
+        serializer = ProcessFileAsyncRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        validated_data = serializer.validated_data
+        credentials = _build_credentials(validated_data)
+        try:
+            file_type = resolve_supported_file_type(validated_data["object_key"])
+        except ProcessingServiceError as exc:
+            return Response({"detail": str(exc), "code": exc.code}, status=exc.status_code)
+
+        run = ProcessingRun.objects.create(
+            bucket=credentials.bucket,
+            object_key=validated_data["object_key"],
+            file_type=file_type,
+            sheet_name=validated_data.get("sheet_name", ""),
+            status="queued",
+            engine="pandas",
+            progress_stage="queued",
+            progress_percent=0,
+        )
+        request_payload = {
+            "access_key_id": credentials.access_key_id,
+            "secret_access_key": credentials.secret_access_key,
+            "session_token": credentials.session_token,
+            "region": credentials.region,
+            "bucket": credentials.bucket,
+            "prefix": credentials.prefix,
+            "object_key": validated_data["object_key"],
+            "sheet_name": validated_data.get("sheet_name", ""),
+            "preview_row_limit": validated_data["preview_row_limit"],
+            "overrides": _build_overrides(validated_data),
+        }
+
+        try:
+            task_result = process_s3_object_async.delay(run_id=run.id, request_payload=request_payload)
+        except Exception:
+            mark_run_failed(run, "Background processing could not be queued in the current environment.")
+            return Response(
+                {
+                    "detail": "Background processing could not be queued in the current environment.",
+                    "code": "task_queue_error",
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        mark_run_queued(run, task_id=task_result.id)
+        return Response(
+            {
+                "runId": run.id,
+                "taskId": task_result.id,
+                "status": run.status,
+                "engine": run.engine,
+            },
+            status=status.HTTP_202_ACCEPTED,
+        )
+
+
+class RunStatusView(APIView):
+    """Expose queued/background run status for frontend polling."""
+
+    authentication_classes = []
+    permission_classes = []
+
+    def get(self, request, run_id: int):
+        """Return the stored lifecycle state for the requested processing run."""
+
+        run = ProcessingRun.objects.filter(pk=run_id).first()
+        if run is None:
+            return Response(
+                {"detail": "The requested processing run could not be found.", "code": "run_not_found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        return Response(serialize_run(run))
+
+
+class SparkCompareView(APIView):
+    """Run the experimental PySpark CSV comparison path."""
+
+    authentication_classes = []
+    permission_classes = []
+
+    def post(self, request):
+        """Compare CSV ingestion and preview generation through a local Spark session."""
+
+        serializer = SparkCompareRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        validated_data = serializer.validated_data
+        credentials = _build_credentials(validated_data)
+
+        try:
+            result = run_spark_csv_comparison(
+                credentials=credentials,
+                object_key=validated_data["object_key"],
+                page=validated_data["page"],
+                page_size=validated_data["page_size"],
+            )
+        except ProcessingServiceError as exc:
+            return Response(
+                {"detail": str(exc), "code": exc.code},
+                status=exc.status_code,
+            )
+
+        return Response(result)
 
 
 class PreviewPageView(APIView):
@@ -168,9 +298,17 @@ class PreviewPageView(APIView):
         run_id = validated_data.get("run_id")
 
         if run_id is not None:
-            run = ProcessingRun.objects.filter(pk=run_id, status="completed").first()
+            run = ProcessingRun.objects.filter(pk=run_id).first()
 
         if run is not None:
+            if run.status != "completed":
+                return Response(
+                    {
+                        "detail": "The requested processing run has not completed yet.",
+                        "code": "run_not_completed",
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
             preview_context = {
                 "object_key": run.object_key,
                 "file_type": run.file_type,

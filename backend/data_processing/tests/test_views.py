@@ -1,5 +1,6 @@
 """API-level regression tests for the data-processing endpoints."""
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.test import TestCase
@@ -99,9 +100,35 @@ class DataProcessingApiTests(TestCase):
         self.assertEqual(run.bucket, "demo-bucket")
         self.assertEqual(run.object_key, "incoming/sample.csv")
         self.assertEqual(run.processing_metadata["durationMs"], 12.4)
+        self.assertEqual(run.preview_rows, [{"Score": 90}, {"Score": 75}])
         self.assertEqual(response.json()["previewPage"]["totalRows"], 2)
         self.assertNotIn("access_key_id", response.json())
         self.assertNotIn("secret_access_key", response.json())
+
+    def test_process_async_endpoint_queues_background_job(self) -> None:
+        """Create a queued run and return the polling identifiers."""
+
+        payload = {
+            **self.credentials_payload,
+            "object_key": "incoming/sample.csv",
+            "preview_row_limit": 100,
+            "overrides": [],
+        }
+
+        with patch(
+            "data_processing.views.process_s3_object_async.delay",
+            return_value=SimpleNamespace(id="task-123"),
+        ) as mocked_delay:
+            response = self.client.post("/api/data/process-async", payload, format="json")
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["taskId"], "task-123")
+        run = ProcessingRun.objects.get()
+        self.assertEqual(run.status, "queued")
+        self.assertEqual(run.engine, "pandas")
+        self.assertEqual(run.progress_stage, "queued")
+        self.assertEqual(run.task_id, "task-123")
+        self.assertEqual(mocked_delay.call_args.kwargs["request_payload"]["object_key"], "incoming/sample.csv")
 
     def test_process_endpoint_returns_service_errors(self) -> None:
         """Map service-layer credential errors to API responses."""
@@ -167,6 +194,15 @@ class DataProcessingApiTests(TestCase):
             ],
             warnings=[],
             preview_columns=["Score"],
+            preview_rows=[{"Score": 90}, {"Score": 75}],
+            preview_page={
+                "page": 1,
+                "pageSize": 2,
+                "totalRows": 4,
+                "totalPages": 2,
+                "hasPreviousPage": False,
+                "hasNextPage": True,
+            },
             processing_metadata={"durationMs": 12.4, "previewRowLimit": 100, "chunkSize": 5000},
         )
 
@@ -200,6 +236,32 @@ class DataProcessingApiTests(TestCase):
         self.assertEqual(response.json()["previewPage"]["page"], 2)
         self.assertEqual(response.json()["previewRows"], [{"Score": 85}, {"Score": 80}])
         self.assertEqual(mocked_preview.call_args.kwargs["row_count"], 4)
+
+    def test_preview_endpoint_rejects_runs_that_are_still_processing(self) -> None:
+        """Avoid paging a run before the background job has completed."""
+
+        run = ProcessingRun.objects.create(
+            bucket="demo-bucket",
+            object_key="incoming/sample.csv",
+            file_type="csv",
+            sheet_name="",
+            status="processing",
+            engine="pandas",
+            progress_stage="profiling_schema",
+            progress_percent=45,
+        )
+
+        payload = {
+            **self.credentials_payload,
+            "run_id": run.id,
+            "page": 1,
+            "page_size": 25,
+        }
+
+        response = self.client.post("/api/data/preview", payload, format="json")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["code"], "run_not_completed")
 
     def test_preview_endpoint_falls_back_to_request_context_when_run_is_missing(self) -> None:
         """Keep paging working in stateless deployments when runs disappear."""
@@ -267,3 +329,86 @@ class DataProcessingApiTests(TestCase):
 
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()["code"], "run_not_found")
+
+    def test_run_status_endpoint_returns_completed_payload(self) -> None:
+        """Expose run lifecycle state plus the completed preview payload."""
+
+        run = ProcessingRun.objects.create(
+            bucket="demo-bucket",
+            object_key="incoming/sample.csv",
+            file_type="csv",
+            sheet_name="",
+            status="completed",
+            engine="pandas",
+            task_id="task-123",
+            progress_stage="completed",
+            progress_percent=100,
+            row_count=2,
+            schema=[
+                {
+                    "column": "Score",
+                    "inferred_type": "integer",
+                    "storage_type": "Int64",
+                    "display_type": "Integer",
+                    "nullable": False,
+                    "confidence": 0.98,
+                    "warnings": [],
+                    "null_token_count": 0,
+                    "sample_values": ["90", "75"],
+                    "allowed_overrides": ["text", "integer", "float", "boolean", "date", "datetime", "category", "complex"],
+                }
+            ],
+            warnings=[],
+            preview_columns=["Score"],
+            preview_rows=[{"Score": 90}, {"Score": 75}],
+            preview_page={
+                "page": 1,
+                "pageSize": 25,
+                "totalRows": 2,
+                "totalPages": 1,
+                "hasPreviousPage": False,
+                "hasNextPage": False,
+            },
+            processing_metadata={"durationMs": 12.4, "previewRowLimit": 25, "chunkSize": 500},
+        )
+
+        response = self.client.get(f"/api/data/runs/{run.id}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "completed")
+        self.assertEqual(response.json()["previewRows"], [{"Score": 90}, {"Score": 75}])
+
+    def test_spark_compare_endpoint_rejects_excel_requests(self) -> None:
+        """Keep the experimental Spark path scoped to CSV files only."""
+
+        payload = {
+            **self.credentials_payload,
+            "object_key": "incoming/sample.xlsx",
+            "page": 1,
+            "page_size": 25,
+        }
+
+        response = self.client.post("/api/data/spark-compare", payload, format="json")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["code"], "unsupported_file_type")
+
+    def test_run_status_endpoint_returns_failure_details(self) -> None:
+        """Surface terminal task failures through the polling endpoint."""
+
+        run = ProcessingRun.objects.create(
+            bucket="demo-bucket",
+            object_key="incoming/sample.csv",
+            file_type="csv",
+            status="failed",
+            engine="pandas",
+            progress_stage="failed",
+            progress_percent=45,
+            error_message="AWS credentials could not be validated.",
+        )
+
+        response = self.client.get(f"/api/data/runs/{run.id}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "failed")
+        self.assertEqual(response.json()["errorMessage"], "AWS credentials could not be validated.")

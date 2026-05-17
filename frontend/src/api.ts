@@ -1,14 +1,27 @@
-import type { ColumnInferenceResult, PreviewPageResponse, ProcessResponse, S3CredentialsInput, S3File } from "./types";
+import type {
+  ColumnInferenceResult,
+  PreviewPageResponse,
+  ProcessAsyncResponse,
+  ProcessResponse,
+  RunStatusResponse,
+  S3CredentialsInput,
+  S3File,
+  SparkComparisonResponse,
+} from "./types";
 
-async function apiFetch<T>(path: string, payload: Record<string, unknown>): Promise<T> {
+async function apiFetch<T>(
+  path: string,
+  payload?: Record<string, unknown>,
+  options?: { method?: "GET" | "POST" },
+): Promise<T> {
   let response: Response;
   try {
     response = await fetch(path, {
-      method: "POST",
+      method: options?.method ?? "POST",
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(payload),
+      body: payload ? JSON.stringify(payload) : undefined,
     });
   } catch {
     throw new Error("The server could not be reached while processing this file. Please try again.");
@@ -74,6 +87,22 @@ export async function processFile(payload: {
   });
 }
 
+export async function processFileAsync(payload: {
+  credentials: S3CredentialsInput;
+  objectKey: string;
+  sheetName?: string;
+  overrides?: Array<{ column: string; target_type: string }>;
+  previewRowLimit?: number;
+}): Promise<ProcessAsyncResponse> {
+  return apiFetch<ProcessAsyncResponse>("/api/data/process-async", {
+    ...payload.credentials,
+    object_key: payload.objectKey,
+    sheet_name: payload.sheetName ?? "",
+    overrides: payload.overrides ?? [],
+    preview_row_limit: payload.previewRowLimit ?? 100,
+  });
+}
+
 export async function fetchPreviewPage(payload: {
   credentials: S3CredentialsInput;
   runId: number;
@@ -97,5 +126,23 @@ export async function fetchPreviewPage(payload: {
     preview_columns: payload.previewColumns,
     page: payload.page,
     page_size: payload.pageSize,
+  });
+}
+
+export async function fetchRunStatus(runId: number): Promise<RunStatusResponse> {
+  return apiFetch<RunStatusResponse>(`/api/data/runs/${runId}`, undefined, { method: "GET" });
+}
+
+export async function runSparkComparison(payload: {
+  credentials: S3CredentialsInput;
+  objectKey: string;
+  page?: number;
+  pageSize?: number;
+}): Promise<SparkComparisonResponse> {
+  return apiFetch<SparkComparisonResponse>("/api/data/spark-compare", {
+    ...payload.credentials,
+    object_key: payload.objectKey,
+    page: payload.page ?? 1,
+    page_size: payload.pageSize ?? 25,
   });
 }

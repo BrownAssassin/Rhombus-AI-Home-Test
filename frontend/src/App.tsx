@@ -1,9 +1,24 @@
-import { startTransition, useState, type JSX } from "react";
+import { startTransition, useEffect, useState, type JSX } from "react";
 
-import { fetchPreviewPage, fetchS3Files, processFile } from "./api";
-import type { ColumnInferenceResult, ProcessResponse, S3CredentialsInput, S3File } from "./types";
+import {
+  fetchPreviewPage,
+  fetchRunStatus,
+  fetchS3Files,
+  processFile,
+  processFileAsync,
+  runSparkComparison,
+} from "./api";
+import type {
+  ColumnInferenceResult,
+  ProcessResponse,
+  RunStatusResponse,
+  S3CredentialsInput,
+  S3File,
+  SparkComparisonResponse,
+} from "./types";
 
 type ViewState = "connection" | "workbench";
+type BusyState = "idle" | "listing" | "processing" | "queueing" | "paging" | "spark";
 
 const PAGE_SIZE_OPTIONS = [25, 50, 100] as const;
 
@@ -70,6 +85,38 @@ function LoadingNotice({ message }: { message: string }): JSX.Element {
   );
 }
 
+function buildProcessResponseFromRun(run: RunStatusResponse): ProcessResponse | null {
+  if (
+    run.status !== "completed" ||
+    !run.schema ||
+    !run.previewColumns ||
+    !run.previewRows ||
+    !run.previewPage ||
+    !run.processingMetadata ||
+    typeof run.rowCount !== "number" ||
+    !run.fileType
+  ) {
+    return null;
+  }
+
+  return {
+    runId: run.runId,
+    rowCount: run.rowCount,
+    schema: run.schema,
+    previewColumns: run.previewColumns,
+    previewRows: run.previewRows,
+    previewPage: run.previewPage,
+    warnings: run.warnings ?? [],
+    processingMetadata: {
+      durationMs: run.processingMetadata.durationMs,
+      previewRowLimit: run.processingMetadata.previewRowLimit ?? 100,
+      chunkSize: run.processingMetadata.chunkSize ?? null,
+    },
+    selectedSheet: run.selectedSheet ?? "",
+    fileType: run.fileType,
+  };
+}
+
 export default function App() {
   const [view, setView] = useState<ViewState>("connection");
   const [isWorkbenchSidebarOpen, setIsWorkbenchSidebarOpen] = useState(false);
@@ -82,7 +129,9 @@ export default function App() {
   const [overrides, setOverrides] = useState<Record<string, string>>({});
   const [rowsPerPage, setRowsPerPage] = useState<number>(25);
   const [currentPage, setCurrentPage] = useState<number>(1);
-  const [busyState, setBusyState] = useState<"idle" | "listing" | "processing" | "paging">("idle");
+  const [busyState, setBusyState] = useState<BusyState>("idle");
+  const [activeRun, setActiveRun] = useState<RunStatusResponse | null>(null);
+  const [sparkComparison, setSparkComparison] = useState<SparkComparisonResponse | null>(null);
   const [error, setError] = useState("");
 
   const selectedFile = files.find((item) => item.key === selectedKey) ?? null;
@@ -105,18 +154,70 @@ export default function App() {
   const changedOverrideCount = displayedSchema.filter(
     (column) => (overrides[column.column] ?? column.inferred_type) !== column.inferred_type,
   ).length;
+  const runIsActive = activeRun?.status === "queued" || activeRun?.status === "processing";
   const busyMessage = {
     idle: "",
     listing: "Loading supported files from S3...",
     processing: "Profiling the dataset and generating the processed preview...",
+    queueing: "Queueing a background processing job...",
     paging: "Loading the requested preview page...",
+    spark: "Running the experimental Spark comparison...",
   }[busyState];
+
+  useEffect(() => {
+    if (!activeRun || !runIsActive) {
+      return undefined;
+    }
+
+    let isCancelled = false;
+    const runId = activeRun.runId;
+
+    const pollRun = async () => {
+      try {
+        const nextRun = await fetchRunStatus(runId);
+        if (isCancelled) {
+          return;
+        }
+
+        setActiveRun(nextRun);
+        if (nextRun.status === "completed") {
+          const nextResult = buildProcessResponseFromRun(nextRun);
+          if (nextResult) {
+            setResult(nextResult);
+            setDetectedSchema(nextResult.schema);
+            setOverrides(schemaToOverrides(nextResult.schema));
+            setCurrentPage(nextResult.previewPage.page);
+            setRowsPerPage(nextResult.previewPage.pageSize);
+            setSparkComparison(null);
+          }
+        } else if (nextRun.status === "failed") {
+          setError(nextRun.errorMessage || "The background processing job failed.");
+        }
+      } catch (caughtError) {
+        if (!isCancelled) {
+          setError(caughtError instanceof Error ? caughtError.message : "Unable to refresh the run status.");
+        }
+      }
+    };
+
+    const intervalId = window.setInterval(() => {
+      void pollRun();
+    }, 2500);
+    void pollRun();
+
+    return () => {
+      isCancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [activeRun?.runId, activeRun?.status, runIsActive]);
 
   function resetWorkbenchState() {
     setResult(null);
     setDetectedSchema([]);
     setOverrides({});
     setCurrentPage(1);
+    setActiveRun(null);
+    setSparkComparison(null);
   }
 
   function updateCredentialField(field: keyof S3CredentialsInput, value: string) {
@@ -170,6 +271,8 @@ export default function App() {
 
     setBusyState("processing");
     setError("");
+    setActiveRun(null);
+    setSparkComparison(null);
 
     try {
       const baselineSchema = displayedSchema;
@@ -199,6 +302,78 @@ export default function App() {
       }
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "Unable to process file.");
+    } finally {
+      setBusyState("idle");
+    }
+  }
+
+  async function handleQueueBackgroundJob() {
+    if (!hasConnectionDetails) {
+      setError(`Enter ${missingConnectionFields.join(", ")} before processing a file.`);
+      return;
+    }
+    if (!selectedKey) {
+      setError("Choose a file before queueing a background job.");
+      return;
+    }
+
+    setBusyState("queueing");
+    setError("");
+    setSparkComparison(null);
+
+    try {
+      const baselineSchema = displayedSchema;
+      const baselineOverrides = schemaToOverrides(baselineSchema);
+      const effectiveOverrides = Object.entries(overrides)
+        .filter(([column, targetType]) => targetType !== baselineOverrides[column])
+        .map(([column, target_type]) => ({ column, target_type }));
+      const queuedRun = await processFileAsync({
+        credentials,
+        objectKey: selectedKey,
+        sheetName,
+        previewRowLimit: rowsPerPage,
+        overrides: effectiveOverrides,
+      });
+      setResult(null);
+      setDetectedSchema([]);
+      setOverrides({});
+      setCurrentPage(1);
+      setActiveRun({
+        ...queuedRun,
+        progressStage: "queued",
+        progressPercent: 0,
+        errorMessage: "",
+      });
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "Unable to queue background processing.");
+    } finally {
+      setBusyState("idle");
+    }
+  }
+
+  async function handleRunSparkComparison() {
+    if (!hasConnectionDetails) {
+      setError(`Enter ${missingConnectionFields.join(", ")} before running the Spark comparison.`);
+      return;
+    }
+    if (!selectedKey) {
+      setError("Choose a CSV file before running the Spark comparison.");
+      return;
+    }
+
+    setBusyState("spark");
+    setError("");
+
+    try {
+      const nextComparison = await runSparkComparison({
+        credentials,
+        objectKey: selectedKey,
+        page: 1,
+        pageSize: rowsPerPage,
+      });
+      setSparkComparison(nextComparison);
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "Unable to run the Spark comparison.");
     } finally {
       setBusyState("idle");
     }
@@ -404,10 +579,7 @@ export default function App() {
                 <span>{selectedFile?.key ?? "No file selected"}</span>
               </div>
               <div className="workbench-header-buttons">
-                <button
-                  className="secondary-button"
-                  onClick={() => setIsWorkbenchSidebarOpen((open) => !open)}
-                >
+                <button className="secondary-button" onClick={() => setIsWorkbenchSidebarOpen((open) => !open)}>
                   {isWorkbenchSidebarOpen ? "Hide files & schema" : "Open files & schema"}
                 </button>
                 <button className="secondary-button" onClick={handleEditConnection}>
@@ -436,7 +608,7 @@ export default function App() {
                         onChange={(event) => {
                           void handleRowsPerPageChange(Number(event.target.value));
                         }}
-                        disabled={busyState !== "idle"}
+                        disabled={busyState !== "idle" || runIsActive}
                       >
                         {PAGE_SIZE_OPTIONS.map((option) => (
                           <option key={option} value={option}>
@@ -476,7 +648,7 @@ export default function App() {
                           onClick={() => {
                             void goToPreviousPage();
                           }}
-                          disabled={!result.previewPage.hasPreviousPage || busyState !== "idle"}
+                          disabled={!result.previewPage.hasPreviousPage || busyState !== "idle" || runIsActive}
                         >
                           Previous
                         </button>
@@ -489,7 +661,7 @@ export default function App() {
                           onClick={() => {
                             void goToNextPage();
                           }}
-                          disabled={!result.previewPage.hasNextPage || busyState !== "idle"}
+                          disabled={!result.previewPage.hasNextPage || busyState !== "idle" || runIsActive}
                         >
                           Next
                         </button>
@@ -526,6 +698,83 @@ export default function App() {
                     </p>
                   </div>
                 )}
+
+                {sparkComparison ? (
+                  <section className="comparison-panel">
+                    <div className="card-header compact">
+                      <div>
+                        <p className="section-label">Experimental</p>
+                        <h2>Spark comparison</h2>
+                      </div>
+                    </div>
+                    <div className="metrics-row">
+                      <div className="metric">
+                        <span className="metric-label">Rows counted</span>
+                        <strong>{sparkComparison.rowCount.toLocaleString()}</strong>
+                      </div>
+                      <div className="metric">
+                        <span className="metric-label">Spark runtime</span>
+                        <strong>{sparkComparison.processingMetadata.durationMs} ms</strong>
+                      </div>
+                      <div className="metric">
+                        <span className="metric-label">Spark master</span>
+                        <strong>{sparkComparison.processingMetadata.sparkMaster}</strong>
+                      </div>
+                    </div>
+                    <div className="callout warning">
+                      <h3>Comparison note</h3>
+                      <ul>
+                        {sparkComparison.notes.map((note) => (
+                          <li key={note}>{note}</li>
+                        ))}
+                      </ul>
+                    </div>
+                    <div className="comparison-grid">
+                      <div className="table-wrap comparison-table-wrap">
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>Column</th>
+                              <th>Spark type</th>
+                              <th>Mapped type</th>
+                              <th>Nullable</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {sparkComparison.sparkSchema.map((item) => (
+                              <tr key={item.column}>
+                                <td>{item.column}</td>
+                                <td>{item.sparkType}</td>
+                                <td>{item.displayType}</td>
+                                <td>{item.nullable ? "Yes" : "No"}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                      <div className="table-wrap comparison-table-wrap">
+                        <table>
+                          <thead>
+                            <tr>
+                              {sparkComparison.previewColumns.map((column) => (
+                                <th key={column}>{column}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {sparkComparison.previewRows.map((row, index) => (
+                              <tr key={`spark-row-${index}`}>
+                                {sparkComparison.previewColumns.map((column) => (
+                                  <td key={`spark-${index}-${column}`}>{String(row[column] ?? "")}</td>
+                                ))}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </section>
+                ) : null}
               </article>
             </section>
 
@@ -561,9 +810,9 @@ export default function App() {
                           <button
                             className="primary-button"
                             onClick={handleProcessFile}
-                            disabled={!selectedKey || busyState !== "idle"}
+                            disabled={!selectedKey || busyState !== "idle" || runIsActive}
                           >
-                            {busyState === "processing" ? "Processing..." : "Process selection"}
+                            {busyState === "processing" ? "Processing..." : "Standard processing (current)"}
                           </button>
                         </div>
                       </div>
@@ -579,7 +828,7 @@ export default function App() {
                         </div>
                       </div>
 
-                      {busyState === "listing" || busyState === "processing" ? (
+                      {busyState === "listing" || busyState === "processing" || busyState === "queueing" || busyState === "spark" ? (
                         <LoadingNotice message={busyMessage} />
                       ) : null}
 
@@ -596,7 +845,9 @@ export default function App() {
                               onClick={() => handleSelectFile(file)}
                             >
                               <span>{file.key}</span>
-                              <span>{file.format.toUpperCase()} - {formatBytes(file.size)}</span>
+                              <span>
+                                {file.format.toUpperCase()} - {formatBytes(file.size)}
+                              </span>
                             </button>
                           ))}
                         </div>
@@ -612,6 +863,33 @@ export default function App() {
                           />
                         </label>
                       ) : null}
+
+                      <section className="advanced-section">
+                        <div>
+                          <p className="section-label">Advanced processing</p>
+                          <h3>Background and comparison tools</h3>
+                        </div>
+                        <div className="advanced-actions">
+                          <button
+                            className="secondary-button"
+                            onClick={handleQueueBackgroundJob}
+                            disabled={!selectedKey || busyState !== "idle" || runIsActive}
+                          >
+                            Queue background job
+                          </button>
+                          <button
+                            className="secondary-button"
+                            onClick={handleRunSparkComparison}
+                            disabled={!selectedKey || selectedFile?.format !== "csv" || busyState !== "idle" || runIsActive}
+                          >
+                            Run Spark comparison
+                          </button>
+                        </div>
+                        <p className="helper-text">
+                          Background jobs keep the current Pandas pipeline as the authoritative path. Spark comparison is
+                          experimental and CSV-only.
+                        </p>
+                      </section>
                     </article>
 
                     <article className="card drawer-card schema-card">
@@ -624,12 +902,51 @@ export default function App() {
                           <button
                             className="secondary-button"
                             onClick={applySchemaDefaults}
-                            disabled={busyState !== "idle" || displayedSchema.length === 0}
+                            disabled={busyState !== "idle" || displayedSchema.length === 0 || runIsActive}
                           >
                             Reset overrides
                           </button>
                         </div>
                       </div>
+
+                      {activeRun ? (
+                        <section className="run-status-panel">
+                          <div className="card-header compact">
+                            <div>
+                              <p className="section-label">Background job</p>
+                              <h3>Run status</h3>
+                            </div>
+                          </div>
+                          <div className="metrics-row">
+                            <div className="metric">
+                              <span className="metric-label">Status</span>
+                              <strong>{activeRun.status}</strong>
+                            </div>
+                            <div className="metric">
+                              <span className="metric-label">Engine</span>
+                              <strong>{activeRun.engine}</strong>
+                            </div>
+                            <div className="metric">
+                              <span className="metric-label">Stage</span>
+                              <strong>{activeRun.progressStage || "queued"}</strong>
+                            </div>
+                            <div className="metric">
+                              <span className="metric-label">Progress</span>
+                              <strong>{activeRun.progressPercent}%</strong>
+                            </div>
+                          </div>
+                          {runIsActive ? (
+                            <LoadingNotice
+                              message={`The job is ${activeRun.progressStage || activeRun.status}. The UI will refresh automatically when it completes.`}
+                            />
+                          ) : null}
+                          {activeRun.errorMessage ? (
+                            <div className="callout danger">
+                              <p>{activeRun.errorMessage}</p>
+                            </div>
+                          ) : null}
+                        </section>
+                      ) : null}
 
                       {result ? (
                         <>
@@ -678,7 +995,7 @@ export default function App() {
                                             [column.column]: event.target.value,
                                           }))
                                         }
-                                        disabled={busyState !== "idle"}
+                                        disabled={busyState !== "idle" || runIsActive}
                                       >
                                         {column.allowed_overrides.map((option) => (
                                           <option key={option} value={option}>
@@ -696,7 +1013,7 @@ export default function App() {
                           </div>
 
                           <div className="toolbar">
-                            <button className="secondary-button" onClick={handleProcessFile} disabled={busyState !== "idle"}>
+                            <button className="secondary-button" onClick={handleProcessFile} disabled={busyState !== "idle" || runIsActive}>
                               Reprocess with overrides
                             </button>
                           </div>

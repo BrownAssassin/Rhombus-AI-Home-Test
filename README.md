@@ -9,7 +9,7 @@
 [![License: Unlicense](https://img.shields.io/badge/License-Unlicense-lightgrey)](LICENSE)
 [![Repo Size](https://img.shields.io/github/repo-size/BrownAssassin/Rhombus-AI-Home-Test)](https://github.com/BrownAssassin/Rhombus-AI-Home-Test)
 
-Single-host Django + React application for browsing CSV and Excel files in Amazon S3, inferring Pandas data types, and previewing the processed result with optional column overrides.
+Single-host Django + React application for browsing CSV and Excel files in Amazon S3, inferring Pandas data types, previewing the processed result with optional column overrides, and experimenting with Redis/Celery background processing plus PySpark CSV comparison.
 
 Public deployment: `https://rhombus-ai-home-test.onrender.com/`
 
@@ -20,6 +20,8 @@ Public deployment: `https://rhombus-ai-home-test.onrender.com/`
 - Profiles columns with conservative inference rules for integers, floats, booleans, dates, datetimes, categories, and complex numbers.
 - Lets the user override inferred types before reprocessing.
 - Pages through the processed dataset from the backend so reviewers can inspect full files instead of a capped in-memory sample.
+- Queues background processing jobs through Celery and Redis while the frontend polls run status updates.
+- Offers an experimental PySpark comparison mode for CSV row counting, schema mapping, and preview generation.
 - Stores sanitized processing metadata in Django without persisting AWS secrets.
 - Exposes a local CLI via `infer_data_types.py` for quick local-file smoke testing.
 
@@ -31,11 +33,14 @@ Public deployment: `https://rhombus-ai-home-test.onrender.com/`
 - Type inference is intentionally conservative: ambiguous short dates stay as text unless overridden, and manual overrides are validated to avoid lossy coercion.
 - Date and DateTime are both backed by pandas datetime storage internally, but the preview renders them differently so date-only columns stay calendar-shaped.
 - Category inference is strict for larger datasets and slightly softer for very small repeated-label samples such as grade-like columns.
+- Redis and Celery now provide an optional background-processing path, but the original synchronous Pandas flow remains the authoritative default path.
+- PySpark is scoped intentionally as an experimental CSV comparison mode. It compares row counts, Spark-native schema mapping, and preview slices without replacing the current Pandas inference engine.
 
 ## Stack
 
-- Backend: Django 5, Django REST Framework, Pandas, boto3
+- Backend: Django 5, Django REST Framework, Pandas, boto3, Celery, Redis, PySpark (experimental)
 - Frontend: React 19, TypeScript, Vite, Vitest
+- Local orchestration: Docker Compose for web, Celery worker, and Redis
 - Deployment shape: single host serving the built frontend from Django
 
 ## Project structure
@@ -46,6 +51,7 @@ Public deployment: `https://rhombus-ai-home-test.onrender.com/`
 - `examples/`: sample datasets for local smoke testing
 - `infer_data_types.py`: local CLI wrapper around the shared processing service
 - `Dockerfile`: production-oriented single-container deployment
+- `docker-compose.yml`: local async development stack for Django, Celery, and Redis
 
 ## Requirements
 
@@ -53,8 +59,10 @@ Public deployment: `https://rhombus-ai-home-test.onrender.com/`
 - Node.js 22 or newer recommended
 - npm 11 or newer
 - Docker Desktop for container verification and deployment builds
+- Java 17 or newer for the experimental local PySpark comparison path
+- Redis for the optional local async-processing stack, unless you use Docker Compose
 
-The current dependency set also installs and runs on Python 3.14, but keeping local development on Python 3.12 reduces drift from the containerized runtime.
+The current dependency set also installs and runs on Python 3.14, but keeping local development on Python 3.12 reduces drift from the containerized runtime. If you only want the stable synchronous flow, Redis and Java are optional. They are needed only for the experimental async and Spark comparison features in this branch.
 
 ## Local setup
 
@@ -80,6 +88,20 @@ cd ..
 python manage.py migrate
 ```
 
+### 4. Optional: start Redis and a Celery worker for the async path
+
+The new async endpoints require Redis plus a running Celery worker. The quickest local path is Docker Compose:
+
+```powershell
+docker compose up --build
+```
+
+If you prefer to run the pieces manually, start Redis first, then launch the worker in a second terminal:
+
+```powershell
+python -m celery -A rhombus_home_test worker --loglevel=info
+```
+
 ## Running the app locally
 
 ### Backend plus built frontend
@@ -94,6 +116,20 @@ python manage.py runserver
 ```
 
 Open `http://127.0.0.1:8000`.
+
+### Async and experimental stack via Docker Compose
+
+This branch adds a local multi-service setup for the new Celery and Redis path:
+
+```powershell
+docker compose up --build
+```
+
+That starts:
+
+- `web`: Django + the built frontend
+- `worker`: Celery background worker
+- `redis`: broker/result backend for queued jobs
 
 ### Split development mode
 
@@ -127,6 +163,12 @@ The app works locally without extra configuration, but these variables are suppo
 - `CSV_CHUNK_SIZE`: chunk size used for CSV profiling and preview paging
 - `STAGED_FILE_CACHE_MAX_ITEMS`: max number of staged S3 files kept on local disk for reuse (`0` disables the cache)
 - `STAGED_FILE_CACHE_TTL_SECONDS`: cache lifetime for staged S3 files
+- `REDIS_URL`: default Redis connection string
+- `CELERY_BROKER_URL`: Celery broker URL, typically Redis
+- `CELERY_RESULT_BACKEND`: Celery result backend URL, typically Redis
+- `CELERY_TASK_TIME_LIMIT`: hard time limit for background tasks
+- `CELERY_TASK_SOFT_TIME_LIMIT`: soft time limit for background tasks
+- `CELERY_TASK_ALWAYS_EAGER`: optional local debugging switch to execute async tasks inline
 - `PORT`: port used by the container startup command
 
 On Render, `RENDER_EXTERNAL_HOSTNAME` and `RENDER_EXTERNAL_URL` are injected automatically and merged into Django's trusted host and origin lists. You only need to set `DJANGO_ALLOWED_HOSTS` or `DJANGO_CSRF_TRUSTED_ORIGINS` manually if you later add a custom domain.
@@ -204,6 +246,39 @@ Response highlights:
 - `previewRows`: first processed page of rows
 - `previewPage`: page metadata including `page`, `pageSize`, `totalRows`, and `totalPages`
 
+### `POST /api/data/process-async`
+
+Queues the existing Pandas processing flow as a Celery background task. This is the production-style enhancement path for longer-running files.
+
+Response highlights:
+
+- `runId`: processing run identifier used for polling
+- `taskId`: Celery task identifier
+- `status`: initial queued state
+- `engine`: currently `pandas`
+
+### `GET /api/data/runs/<id>`
+
+Polls the current run lifecycle state.
+
+While queued or processing, the response returns:
+
+- `status`
+- `engine`
+- `progressStage`
+- `progressPercent`
+- `errorMessage`
+
+Once completed, it also returns the same processed payload shape used by `POST /api/data/process`, including:
+
+- `rowCount`
+- `schema`
+- `previewColumns`
+- `previewRows`
+- `previewPage`
+- `warnings`
+- `processingMetadata`
+
 ### `POST /api/data/preview`
 
 Returns a specific processed page using the current schema and file context. The API will reuse the stored `ProcessingRun`
@@ -244,6 +319,29 @@ Request body:
   "page_size": 50
 }
 ```
+
+### `POST /api/data/spark-compare`
+
+Runs an experimental CSV-only PySpark comparison against the selected staged S3 file. This mode is intentionally educational and does not replace the main Pandas inference pipeline.
+
+Response highlights:
+
+- `sparkSchema`: Spark-native type details plus mapped user-facing labels
+- `rowCount`: Spark row count
+- `previewColumns` and `previewRows`: requested Spark preview slice
+- `processingMetadata.durationMs`: Spark comparison timing
+- `notes`: reminder that the Pandas path remains authoritative
+
+## Async architecture flow
+
+The enhancement path introduced on this branch follows this lifecycle:
+
+```text
+Django request -> Celery task -> Redis broker/result backend -> Celery worker
+-> ProcessingRun updates in Django -> frontend polling via GET /api/data/runs/<id>
+```
+
+That keeps Redis focused on transient queueing and task state, while Django remains the durable source of truth for user-visible processing runs.
 
 ## Testing
 
@@ -288,9 +386,17 @@ docker run --rm -p 8000:8000 `
 
 Then open `http://127.0.0.1:8000`.
 
+Run the local async stack:
+
+```powershell
+docker compose up --build
+```
+
 ## Render deployment
 
 Render is the recommended public host for this project because it matches the app's single-container architecture and gives you one public URL for both the Django API and the React frontend.
+
+This branch keeps the current synchronous Pandas flow as the stable deployment default. The new Redis/Celery and PySpark additions are intended to be validated locally or in a separate enhancement/demo environment first rather than forcing them into the existing submission deployment immediately.
 
 ### Create the service
 
@@ -336,3 +442,6 @@ Render automatically provides `PORT`, `RENDER_EXTERNAL_HOSTNAME`, and `RENDER_EX
 - Small repeated-label columns can infer as `Category`, but high-cardinality or mostly-unique string columns intentionally stay as `Text`.
 - The app supports paginated preview browsing across the processed dataset, but it does not export a full transformed file in this MVP.
 - A Render deployment that keeps SQLite in the container filesystem is suitable for demos, but `ProcessingRun` history resets whenever the service is rebuilt or restarted.
+- Redis and Celery are the real production-style enhancement in this branch. They move longer processing jobs out of the request-response cycle while keeping Django as the source of truth for run status.
+- The PySpark feature in this branch is experimental and CSV-only. It is intentionally framed as a comparison/learning tool, not as a drop-in replacement for the main Pandas inference engine.
+- The polished `main` branch remains the stable submission snapshot. This branch is a post-submission enhancement that demonstrates how Redis/Celery and PySpark could be applied to the app thoughtfully.

@@ -3,6 +3,9 @@ djangorestframework==3.16.1
 boto3==1.40.59
 pandas==2.3.3
 openpyxl==3.1.5
+celery==5.5.3
+redis==6.1.0
+pyspark==3.5.6
 gunicorn==23.0.0
 whitenoise==6.11.0
 

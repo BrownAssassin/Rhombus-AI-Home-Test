@@ -11,7 +11,7 @@ import tempfile
 import threading
 import time
 from time import perf_counter
-from typing import Any
+from typing import Any, Callable
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
@@ -222,6 +222,7 @@ STAGED_FILE_CACHE = StagedFileCache(
     max_items=STAGED_FILE_CACHE_MAX_ITEMS,
     ttl_seconds=STAGED_FILE_CACHE_TTL_SECONDS,
 )
+ProgressReporter = Callable[[str, int], None]
 
 
 def build_s3_client(credentials: S3Credentials):
@@ -639,6 +640,7 @@ def process_s3_object(
     sheet_name: str = "",
     overrides: dict[str, str] | None = None,
     preview_row_limit: int = 100,
+    progress_callback: ProgressReporter | None = None,
 ) -> dict[str, Any]:
     """Process an S3 object and return the first preview page plus schema."""
 
@@ -647,11 +649,28 @@ def process_s3_object(
 
         client = build_s3_client(credentials)
         started = perf_counter()
+        if progress_callback is not None:
+            progress_callback("staging_file", 10)
 
         if file_type == "csv":
-            result = _process_csv(client, credentials.bucket, object_key, overrides or {}, preview_row_limit)
+            result = _process_csv(
+                client,
+                credentials.bucket,
+                object_key,
+                overrides or {},
+                preview_row_limit,
+                progress_callback=progress_callback,
+            )
         else:
-            result = _process_excel(client, credentials.bucket, object_key, sheet_name, overrides or {}, preview_row_limit)
+            result = _process_excel(
+                client,
+                credentials.bucket,
+                object_key,
+                sheet_name,
+                overrides or {},
+                preview_row_limit,
+                progress_callback=progress_callback,
+            )
 
         duration_ms = round((perf_counter() - started) * 1000, 2)
         result["processingMetadata"] = {
@@ -659,6 +678,8 @@ def process_s3_object(
             "previewRowLimit": preview_row_limit,
             "chunkSize": CSV_CHUNK_SIZE if file_type == "csv" else None,
         }
+        if progress_callback is not None:
+            progress_callback("completed", 100)
         return result
     except MemoryError as exc:
         raise ResourceLimitError(RESOURCE_LIMIT_MESSAGE) from exc
@@ -763,12 +784,27 @@ def process_local_file(
         raise ResourceLimitError(RESOURCE_LIMIT_MESSAGE) from exc
 
 
-def _process_csv(client, bucket: str, object_key: str, overrides: dict[str, str], preview_row_limit: int) -> dict[str, Any]:
+def _process_csv(
+    client,
+    bucket: str,
+    object_key: str,
+    overrides: dict[str, str],
+    preview_row_limit: int,
+    *,
+    progress_callback: ProgressReporter | None = None,
+) -> dict[str, Any]:
     """Process a staged S3 CSV through the local chunked CSV pipeline."""
 
     staged_file = _get_staged_s3_object_path(client, bucket, object_key)
     try:
-        result = _process_local_csv(staged_file.path, overrides, preview_row_limit)
+        if progress_callback is not None:
+            progress_callback("profiling_schema", 45)
+        result = _process_local_csv(
+            staged_file.path,
+            overrides,
+            preview_row_limit,
+            progress_callback=progress_callback,
+        )
         return {
             "bucket": bucket,
             **result,
@@ -785,6 +821,8 @@ def _process_excel(
     sheet_name: str,
     overrides: dict[str, str],
     preview_row_limit: int,
+    *,
+    progress_callback: ProgressReporter | None = None,
 ) -> dict[str, Any]:
     """Process a staged S3 Excel file through the in-memory Excel path."""
 
@@ -795,10 +833,14 @@ def _process_excel(
         max_size_bytes=MAX_EXCEL_SIZE_BYTES,
     )
     try:
+        if progress_callback is not None:
+            progress_callback("profiling_schema", 45)
         df, selected_sheet = _load_local_excel_dataframe(
             staged_file.path,
             sheet_name,
         )
+        if progress_callback is not None:
+            progress_callback("building_preview", 85)
 
         result = process_dataframe(
             df,
@@ -816,7 +858,13 @@ def _process_excel(
         _release_staged_file(staged_file)
 
 
-def _process_local_csv(file_path: Path, overrides: dict[str, str], preview_row_limit: int) -> dict[str, Any]:
+def _process_local_csv(
+    file_path: Path,
+    overrides: dict[str, str],
+    preview_row_limit: int,
+    *,
+    progress_callback: ProgressReporter | None = None,
+) -> dict[str, Any]:
     """Infer schema from a local CSV while keeping preview work bounded."""
 
     columns = _fetch_local_csv_columns(file_path)
@@ -836,6 +884,8 @@ def _process_local_csv(file_path: Path, overrides: dict[str, str], preview_row_l
         )
 
     schema, warnings = build_schema_from_profiles(profiles, overrides)
+    if progress_callback is not None:
+        progress_callback("building_preview", 85)
 
     preview_rows: list[dict[str, Any]] = []
     preview_columns: list[str] = columns
