@@ -131,6 +131,8 @@ That starts:
 - `worker`: Celery background worker
 - `redis`: broker/result backend for queued jobs
 
+The Compose setup mounts a shared SQLite volume for both `web` and `worker` so background tasks can read and update the same `ProcessingRun` rows that the web container creates.
+
 ### Split development mode
 
 Run Django for the API:

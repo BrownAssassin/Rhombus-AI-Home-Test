@@ -9,21 +9,27 @@ services:
     environment:
       DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1
       DJANGO_CSRF_TRUSTED_ORIGINS: http://localhost:8000
+      DJANGO_SQLITE_PATH: /app/data/db.sqlite3
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
+    volumes:
+      - app_data:/app/data
     depends_on:
       - redis
 
   worker:
     build: .
-    command: sh -c "python manage.py migrate --noinput && celery -A rhombus_home_test worker --loglevel=info"
+    command: celery -A rhombus_home_test worker --loglevel=info --concurrency=2
     env_file:
       - .env.example
     environment:
+      DJANGO_SQLITE_PATH: /app/data/db.sqlite3
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
+    volumes:
+      - app_data:/app/data
     depends_on:
       - redis
 
@@ -31,3 +37,6 @@ services:
     image: redis:7-alpine
     ports:
       - "6379:6379"
+
+volumes:
+  app_data:
