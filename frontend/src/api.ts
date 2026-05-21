@@ -7,7 +7,6 @@ import type {
   RunStatusResponse,
   S3CredentialsInput,
   S3File,
-  SparkComparisonResponse,
 } from "./types";
 
 export class ApiError extends Error {
@@ -167,13 +166,13 @@ export async function fetchRecentRuns(params?: { objectKey?: string; limit?: num
 
 export async function runSparkComparison(payload: {
   credentials: S3CredentialsInput;
-  objectKey: string;
+  sourceRunId: number;
   page?: number;
   pageSize?: number;
-}): Promise<SparkComparisonResponse> {
-  return apiFetch<SparkComparisonResponse>("/api/data/spark-compare", {
+}): Promise<ProcessAsyncResponse> {
+  return apiFetch<ProcessAsyncResponse>("/api/data/spark-compare", {
     ...payload.credentials,
-    object_key: payload.objectKey,
+    source_run_id: payload.sourceRunId,
     page: payload.page ?? 1,
     page_size: payload.pageSize ?? 25,
   });

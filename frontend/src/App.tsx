@@ -204,6 +204,8 @@ export default function App() {
   const [busyState, setBusyState] = useState<BusyState>("idle");
   const [recentRuns, setRecentRuns] = useState<RunSummary[]>([]);
   const [pendingProcessRunId, setPendingProcessRunId] = useState<number | null>(null);
+  const [pendingSparkRunId, setPendingSparkRunId] = useState<number | null>(null);
+  const [selectedSparkRunId, setSelectedSparkRunId] = useState<number | null>(null);
   const [sparkComparison, setSparkComparison] = useState<SparkComparisonResponse | null>(null);
   const [error, setError] = useState("");
   const [fallbackNotice, setFallbackNotice] = useState("");
@@ -236,7 +238,7 @@ export default function App() {
     processing: "Profiling the dataset and generating the processed preview...",
     queueing: "Starting a tracked background job...",
     paging: "Loading the requested preview page...",
-    spark: "Running the experimental Spark comparison...",
+    spark: "Queueing the experimental Spark comparison...",
     loadingRun: "Loading the selected run result...",
   }[busyState];
 
@@ -290,18 +292,29 @@ export default function App() {
         if (pendingProcessRunId !== null) {
           const pendingRun = nextRuns.find((run) => run.runId === pendingProcessRunId);
           if (pendingRun?.status === "completed") {
-            const nextRun = await fetchRunStatus(pendingRun.runId);
+            const nextResult = await loadCompletedProcessRun(pendingRun.runId);
             if (isCancelled) {
               return;
             }
-            const nextResult = buildProcessResponseFromRun(nextRun);
-            if (nextResult) {
-              applyProcessResult(nextResult, nextResult.processingMetadata.appliedOverrides ?? {});
-            }
+            applyProcessResult(nextResult, nextResult.processingMetadata.appliedOverrides ?? {});
             setPendingProcessRunId(null);
           } else if (pendingRun?.status === "failed") {
             setError(pendingRun.errorMessage || "The background processing job failed.");
             setPendingProcessRunId(null);
+          }
+        }
+
+        if (pendingSparkRunId !== null) {
+          const pendingRun = nextRuns.find((run) => run.runId === pendingSparkRunId);
+          if (pendingRun?.status === "completed") {
+            await loadSparkComparisonRun(pendingRun.runId, pendingRun.sourceRunId);
+            if (isCancelled) {
+              return;
+            }
+            setPendingSparkRunId(null);
+          } else if (pendingRun?.status === "failed") {
+            setError(pendingRun.errorMessage || "The Spark comparison job failed.");
+            setPendingSparkRunId(null);
           }
         }
       } catch (caughtError) {
@@ -326,7 +339,7 @@ export default function App() {
         window.clearTimeout(timeoutId);
       }
     };
-  }, [pendingProcessRunId, runIsActive, selectedKey, view]);
+  }, [pendingProcessRunId, pendingSparkRunId, result?.runId, runIsActive, selectedKey, view]);
 
   function applyProcessResult(nextResult: ProcessResponse, appliedOverrides: Record<string, string>) {
     setResult(nextResult);
@@ -337,6 +350,7 @@ export default function App() {
       ...schemaToOverrides(nextResult.schema),
       ...appliedOverrides,
     });
+    setSelectedSparkRunId(null);
     setSparkComparison(null);
   }
 
@@ -347,6 +361,8 @@ export default function App() {
     setCurrentPage(1);
     setRecentRuns([]);
     setPendingProcessRunId(null);
+    setPendingSparkRunId(null);
+    setSelectedSparkRunId(null);
     setSparkComparison(null);
     setFallbackNotice("");
   }
@@ -413,6 +429,32 @@ export default function App() {
     }
   }
 
+  async function loadCompletedProcessRun(runId: number): Promise<ProcessResponse> {
+    const run = await fetchRunStatus(runId);
+    const nextResult = buildProcessResponseFromRun(run);
+    if (!nextResult) {
+      throw new Error("The selected run is not a completed Pandas processing result.");
+    }
+    return nextResult;
+  }
+
+  async function loadSparkComparisonRun(runId: number, sourceRunId?: number | null): Promise<SparkComparisonResponse> {
+    const comparisonRun = await fetchRunStatus(runId);
+    if (!comparisonRun.sparkComparison) {
+      throw new Error("The selected run does not contain a completed Spark comparison.");
+    }
+
+    const comparisonSourceRunId = comparisonRun.sourceRunId ?? sourceRunId ?? null;
+    if (comparisonSourceRunId && result?.runId !== comparisonSourceRunId) {
+      const sourceResult = await loadCompletedProcessRun(comparisonSourceRunId);
+      applyProcessResult(sourceResult, sourceResult.processingMetadata.appliedOverrides ?? {});
+    }
+
+    setSelectedSparkRunId(comparisonRun.runId);
+    setSparkComparison(comparisonRun.sparkComparison);
+    return comparisonRun.sparkComparison;
+  }
+
   async function runSynchronousProcess(appliedOverrideMap: Record<string, string>) {
     setBusyState("processing");
 
@@ -448,6 +490,7 @@ export default function App() {
     setBusyState("queueing");
     setError("");
     setFallbackNotice("");
+    setSelectedSparkRunId(null);
     setSparkComparison(null);
 
     const { rows: effectiveOverrides, appliedOverrideMap } = buildEffectiveOverrides(displayedSchema, overrides);
@@ -492,24 +535,36 @@ export default function App() {
       setError(`Enter ${missingConnectionFields.join(", ")} before running the Spark comparison.`);
       return;
     }
-    if (!selectedKey) {
-      setError("Choose a CSV file before running the Spark comparison.");
+    if (!result || result.fileType !== "csv") {
+      setError("Complete a CSV Pandas run before comparing it with Spark.");
       return;
     }
 
     setBusyState("spark");
     setError("");
+    setSelectedSparkRunId(null);
+    setSparkComparison(null);
 
     try {
-      const nextComparison = await runSparkComparison({
+      const queuedRun = await runSparkComparison({
         credentials,
-        objectKey: selectedKey,
-        page: 1,
+        sourceRunId: result.runId,
+        page: activePage,
         pageSize: rowsPerPage,
       });
-      setSparkComparison(nextComparison);
+      setPendingSparkRunId(queuedRun.runId);
+      upsertQueuedRun(
+        buildQueuedRunSummary({
+          ...queuedRun,
+          bucket: credentials.bucket,
+          objectKey: selectedKey,
+          fileType: result.fileType,
+          selectedSheet: result.selectedSheet,
+        }),
+      );
+      await refreshRecentRuns(true);
     } catch (caughtError) {
-      setError(caughtError instanceof Error ? caughtError.message : "Unable to run the Spark comparison.");
+      setError(caughtError instanceof Error ? caughtError.message : "Unable to queue the Spark comparison.");
     } finally {
       setBusyState("idle");
     }
@@ -562,14 +617,23 @@ export default function App() {
     setError("");
 
     try {
-      const run = await fetchRunStatus(runId);
-      const nextResult = buildProcessResponseFromRun(run);
-      if (!nextResult) {
-        throw new Error("The selected run is not a completed Pandas processing result.");
-      }
+      const nextResult = await loadCompletedProcessRun(runId);
       applyProcessResult(nextResult, nextResult.processingMetadata.appliedOverrides ?? {});
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "Unable to load the selected run result.");
+    } finally {
+      setBusyState("idle");
+    }
+  }
+
+  async function handleViewSparkComparisonRun(runId: number, sourceRunId?: number | null) {
+    setBusyState("loadingRun");
+    setError("");
+
+    try {
+      await loadSparkComparisonRun(runId, sourceRunId);
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "Unable to load the selected Spark comparison.");
     } finally {
       setBusyState("idle");
     }
@@ -766,11 +830,16 @@ export default function App() {
                   <div className="job-list">
                     {recentRuns.map((run) => {
                       const isCurrentResult = result?.runId === run.runId;
+                      const isCurrentComparison = selectedSparkRunId === run.runId;
                       const canRetry = run.runType === "process" && run.status === "failed" && run.objectKey === selectedKey;
                       const canViewResult = run.runType === "process" && run.status === "completed";
+                      const canViewComparison = run.runType === "spark_compare" && run.status === "completed";
 
                       return (
-                        <article key={run.runId} className={`job-card ${isCurrentResult ? "job-card-current" : ""}`}>
+                        <article
+                          key={run.runId}
+                          className={`job-card ${isCurrentResult || isCurrentComparison ? "job-card-current" : ""}`}
+                        >
                           <div className="job-card-header">
                             <div>
                               <p className="job-title">{run.objectKey}</p>
@@ -795,6 +864,17 @@ export default function App() {
                                 disabled={busyState !== "idle" || isCurrentResult}
                               >
                                 {isCurrentResult ? "Viewing result" : "View result"}
+                              </button>
+                            ) : null}
+                            {canViewComparison ? (
+                              <button
+                                className="secondary-button"
+                                onClick={() => {
+                                  void handleViewSparkComparisonRun(run.runId, run.sourceRunId);
+                                }}
+                                disabled={busyState !== "idle" || isCurrentComparison}
+                              >
+                                {isCurrentComparison ? "Viewing comparison" : "View comparison"}
                               </button>
                             ) : null}
                             {canRetry ? (
@@ -916,26 +996,34 @@ export default function App() {
                   </div>
                 )}
 
-                {sparkComparison ? (
+                {sparkComparison && result ? (
                   <section className="comparison-panel">
                     <div className="card-header compact">
                       <div>
                         <p className="section-label">Experimental</p>
-                        <h2>Spark comparison</h2>
+                        <h2>Compare with Spark</h2>
+                        <p className="helper-text">
+                          This comparison uses the same CSV source as the selected Pandas run. Pandas remains the
+                          authoritative inference pipeline for the app.
+                        </p>
                       </div>
                     </div>
                     <div className="metrics-row">
                       <div className="metric">
-                        <span className="metric-label">Rows counted</span>
-                        <strong>{sparkComparison.rowCount.toLocaleString()}</strong>
+                        <span className="metric-label">Pandas runtime</span>
+                        <strong>{result.processingMetadata.durationMs} ms</strong>
                       </div>
                       <div className="metric">
                         <span className="metric-label">Spark runtime</span>
                         <strong>{sparkComparison.processingMetadata.durationMs} ms</strong>
                       </div>
                       <div className="metric">
-                        <span className="metric-label">Spark master</span>
-                        <strong>{sparkComparison.processingMetadata.sparkMaster}</strong>
+                        <span className="metric-label">Pandas rows</span>
+                        <strong>{result.rowCount.toLocaleString()}</strong>
+                      </div>
+                      <div className="metric">
+                        <span className="metric-label">Spark rows</span>
+                        <strong>{sparkComparison.rowCount.toLocaleString()}</strong>
                       </div>
                     </div>
                     <div className="callout warning">
@@ -970,6 +1058,21 @@ export default function App() {
                         </table>
                       </div>
                       <div className="table-wrap comparison-table-wrap">
+                        <div className="comparison-preview-header">
+                          <div>
+                            <h3>Spark preview</h3>
+                            <p>
+                              Rows{" "}
+                              {(sparkComparison.previewPage.page - 1) * sparkComparison.previewPage.pageSize + 1}-
+                              {(sparkComparison.previewPage.page - 1) * sparkComparison.previewPage.pageSize +
+                                sparkComparison.previewRows.length}{" "}
+                              of {sparkComparison.previewPage.totalRows}
+                            </p>
+                          </div>
+                          <span className="comparison-badge">
+                            {sparkComparison.processingMetadata.sparkMaster}
+                          </span>
+                        </div>
                         <table>
                           <thead>
                             <tr>
@@ -1085,24 +1188,27 @@ export default function App() {
                         </label>
                       ) : null}
 
-                      <section className="advanced-section">
-                        <div>
-                          <p className="section-label">Advanced processing</p>
-                          <h3>Comparison tools</h3>
-                        </div>
-                        <div className="advanced-actions">
-                          <button
-                            className="secondary-button"
-                            onClick={handleRunSparkComparison}
-                            disabled={!selectedKey || selectedFile?.format !== "csv" || busyState !== "idle" || runIsActive}
-                          >
-                            Run Spark comparison
-                          </button>
-                        </div>
-                        <p className="helper-text">
-                          Processing now prefers tracked background jobs automatically. Spark comparison remains experimental and CSV-only.
-                        </p>
-                      </section>
+                      {result?.fileType === "csv" ? (
+                        <section className="advanced-section">
+                          <div>
+                            <p className="section-label">Advanced processing</p>
+                            <h3>Compare engines</h3>
+                          </div>
+                          <div className="advanced-actions">
+                            <button
+                              className="secondary-button"
+                              onClick={handleRunSparkComparison}
+                              disabled={busyState !== "idle" || runIsActive}
+                            >
+                              {pendingSparkRunId !== null ? "Queueing comparison..." : "Compare with Spark (experimental)"}
+                            </button>
+                          </div>
+                          <p className="helper-text">
+                            Run Spark against this completed CSV result to compare row counts, runtime, and Spark-native
+                            schema mapping without replacing the current Pandas workflow.
+                          </p>
+                        </section>
+                      ) : null}
                     </article>
 
                     <article className="card drawer-card schema-card">

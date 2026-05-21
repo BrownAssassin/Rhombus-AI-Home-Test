@@ -474,12 +474,34 @@ class DataProcessingApiTests(TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["code"], "source_run_not_completed")
 
-    def test_spark_compare_endpoint_rejects_excel_requests(self) -> None:
-        """Keep the experimental Spark path scoped to CSV files only."""
+    def test_spark_compare_endpoint_requires_a_completed_source_run_id(self) -> None:
+        """Keep the comparison API anchored to an existing Pandas result."""
 
         payload = {
             **self.credentials_payload,
-            "object_key": "incoming/sample.xlsx",
+            "page": 1,
+            "page_size": 25,
+        }
+
+        response = self.client.post("/api/data/spark-compare", payload, format="json")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("source_run_id", response.json())
+
+    def test_spark_compare_endpoint_rejects_excel_requests(self) -> None:
+        """Keep the experimental Spark path scoped to CSV files only."""
+
+        source_run = ProcessingRun.objects.create(
+            bucket="demo-bucket",
+            object_key="incoming/sample.xlsx",
+            file_type="excel",
+            run_type="process",
+            status="completed",
+            engine="pandas",
+        )
+        payload = {
+            **self.credentials_payload,
+            "source_run_id": source_run.id,
             "page": 1,
             "page_size": 25,
         }

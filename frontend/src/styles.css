@@ -620,6 +620,33 @@ input::placeholder {
   overflow: auto;
 }
 
+.comparison-preview-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 0.85rem;
+}
+
+.comparison-preview-header h3,
+.comparison-preview-header p {
+  margin: 0;
+}
+
+.comparison-preview-header p {
+  color: rgba(248, 244, 234, 0.62);
+  font-size: 0.9rem;
+}
+
+.comparison-badge {
+  align-self: flex-start;
+  padding: 0.35rem 0.7rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(248, 244, 234, 0.72);
+  font-size: 0.82rem;
+}
+
 .pagination-select {
   display: grid;
   gap: 0.35rem;

@@ -20,8 +20,8 @@ Public deployment: `https://rhombus-ai-home-test.onrender.com/`
 - Profiles columns with conservative inference rules for integers, floats, booleans, dates, datetimes, categories, and complex numbers.
 - Lets the user override inferred types before reprocessing.
 - Pages through the processed dataset from the backend so reviewers can inspect full files instead of a capped in-memory sample.
-- Queues background processing jobs through Celery and Redis while the frontend polls run status updates.
-- Offers an experimental PySpark comparison mode for CSV row counting, schema mapping, and preview generation.
+- Prefers background processing jobs through Celery and Redis while the workbench keeps the last successful preview visible and polls recent run status updates.
+- Offers an experimental PySpark comparison mode for completed CSV Pandas runs so users can compare runtime, row counts, schema mapping, and preview output.
 - Stores sanitized processing metadata in Django without persisting AWS secrets.
 - Exposes a local CLI via `infer_data_types.py` for quick local-file smoke testing.
 
@@ -33,8 +33,8 @@ Public deployment: `https://rhombus-ai-home-test.onrender.com/`
 - Type inference is intentionally conservative: ambiguous short dates stay as text unless overridden, and manual overrides are validated to avoid lossy coercion.
 - Date and DateTime are both backed by pandas datetime storage internally, but the preview renders them differently so date-only columns stay calendar-shaped.
 - Category inference is strict for larger datasets and slightly softer for very small repeated-label samples such as grade-like columns.
-- Redis and Celery now provide an optional background-processing path, but the original synchronous Pandas flow remains the authoritative default path.
-- PySpark is scoped intentionally as an experimental CSV comparison mode. It compares row counts, Spark-native schema mapping, and preview slices without replacing the current Pandas inference engine.
+- Redis and Celery now power the normal workbench processing flow on this branch, while the original synchronous Pandas path remains as an automatic fallback when queue infrastructure is unavailable.
+- PySpark is scoped intentionally as an experimental CSV comparison mode that runs after a completed Pandas result exists. It compares row counts, Spark-native schema mapping, and preview slices without replacing the current Pandas inference engine.
 
 ## Stack
 
@@ -250,7 +250,7 @@ Response highlights:
 
 ### `POST /api/data/process-async`
 
-Queues the existing Pandas processing flow as a Celery background task. This is the production-style enhancement path for longer-running files.
+Queues the existing Pandas processing flow as a Celery background task. The enhancement-branch workbench tries this endpoint first and falls back to the synchronous process endpoint only if queue infrastructure is unavailable.
 
 Response highlights:
 
@@ -280,6 +280,17 @@ Once completed, it also returns the same processed payload shape used by `POST /
 - `previewPage`
 - `warnings`
 - `processingMetadata`
+
+Completed Spark comparison runs return the shared lifecycle fields plus a `sparkComparison` payload instead of the main Pandas schema payload.
+
+### `GET /api/data/runs`
+
+Lists recent processing and comparison runs for the current workbench file so the frontend can render the jobs tray.
+
+Query params:
+
+- `object_key`: optional S3 object key filter
+- `limit`: optional max item count, default `5`
 
 ### `POST /api/data/preview`
 
@@ -324,15 +335,19 @@ Request body:
 
 ### `POST /api/data/spark-compare`
 
-Runs an experimental CSV-only PySpark comparison against the selected staged S3 file. This mode is intentionally educational and does not replace the main Pandas inference pipeline.
+Queues an experimental CSV-only PySpark comparison against a completed Pandas processing run. This mode is intentionally educational and does not replace the main Pandas inference pipeline.
+
+Request body highlights:
+
+- `source_run_id`: required completed Pandas run identifier for the CSV result being compared
+- `page` and `page_size`: requested Spark preview slice for the comparison payload
 
 Response highlights:
 
-- `sparkSchema`: Spark-native type details plus mapped user-facing labels
-- `rowCount`: Spark row count
-- `previewColumns` and `previewRows`: requested Spark preview slice
-- `processingMetadata.durationMs`: Spark comparison timing
-- `notes`: reminder that the Pandas path remains authoritative
+- `runId`: queued Spark comparison run
+- `taskId`: Celery task identifier
+- `runType`: `spark_compare`
+- `sourceRunId`: completed Pandas run that the comparison is anchored to
 
 ## Async architecture flow
 

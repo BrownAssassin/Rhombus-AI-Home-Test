@@ -442,43 +442,113 @@ describe("App", () => {
     expect(screen.getByRole("cell", { name: "Score" })).toBeInTheDocument();
   });
 
-  it("runs the experimental Spark comparison for CSV files and disables it for Excel", async () => {
+  it("runs the experimental Spark comparison from a completed CSV result and hides it for non-result contexts", async () => {
+    const processResponse = buildProcessResponse({
+      runId: 3,
+      previewColumns: ["Score"],
+      previewRows: [{ Score: 90 }, { Score: 75 }],
+    });
+    const sparkComparisonRun = {
+      runId: 9,
+      taskId: "spark-task-123",
+      runType: "spark_compare",
+      sourceRunId: 3,
+      status: "completed",
+      engine: "spark",
+      bucket: "demo-bucket",
+      objectKey: "sample.csv",
+      progressStage: "completed",
+      progressPercent: 100,
+      errorMessage: "",
+      createdAt: "2026-05-21T00:05:00Z",
+      startedAt: "2026-05-21T00:05:01Z",
+      completedAt: "2026-05-21T00:05:02Z",
+      fileType: "csv",
+      selectedSheet: "",
+      sparkComparison: {
+        engine: "spark",
+        fileType: "csv",
+        objectKey: "sample.csv",
+        rowCount: 2,
+        sparkSchema: [
+          { column: "Score", sparkType: "int", mappedType: "integer", displayType: "Integer", nullable: false },
+        ],
+        previewColumns: ["Score"],
+        previewRows: [{ Score: "90" }, { Score: "75" }],
+        previewPage: {
+          page: 1,
+          pageSize: 25,
+          totalRows: 2,
+          totalPages: 1,
+          hasPreviousPage: false,
+          hasNextPage: false,
+        },
+        processingMetadata: { durationMs: 32.1, pageSize: 25, sparkMaster: "local[*]" },
+        notes: ["Experimental comparison mode."],
+      },
+    };
+
     const fetchMock = vi.fn();
     fetchMock
       .mockResolvedValueOnce(
         jsonResponse({
-          files: [{ key: "sample.csv", size: 147, lastModified: "2026-04-03T00:00:00Z", format: "csv" }],
+          files: [
+            { key: "sample.csv", size: 147, lastModified: "2026-04-03T00:00:00Z", format: "csv" },
+            { key: "workbook.xlsx", size: 512, lastModified: "2026-04-03T00:00:00Z", format: "excel" },
+          ],
         }),
       )
       .mockResolvedValueOnce(jsonResponse({ runs: [] }))
+      .mockResolvedValueOnce(jsonResponse({ detail: "Queue unavailable", code: "task_queue_error" }, { ok: false, status: 503 }))
+      .mockResolvedValueOnce(jsonResponse(processResponse))
+      .mockResolvedValueOnce(jsonResponse({ runs: [buildRecentRun({ runId: 3 })] }))
       .mockResolvedValueOnce(
         jsonResponse({
+          runId: 9,
+          taskId: "spark-task-123",
+          runType: "spark_compare",
+          sourceRunId: 3,
+          status: "queued",
           engine: "spark",
-          fileType: "csv",
-          objectKey: "sample.csv",
-          rowCount: 2,
-          sparkSchema: [
-            { column: "Score", sparkType: "int", mappedType: "integer", displayType: "Integer", nullable: false },
-          ],
-          previewColumns: ["Score"],
-          previewRows: [{ Score: "90" }, { Score: "75" }],
-          previewPage: {
-            page: 1,
-            pageSize: 25,
-            totalRows: 2,
-            totalPages: 1,
-            hasPreviousPage: false,
-            hasNextPage: false,
-          },
-          processingMetadata: { durationMs: 32.1, pageSize: 25, sparkMaster: "local[*]" },
-          notes: ["Experimental comparison mode."],
         }),
       )
       .mockResolvedValueOnce(
         jsonResponse({
-          files: [{ key: "workbook.xlsx", size: 512, lastModified: "2026-04-03T00:00:00Z", format: "excel" }],
+          runs: [
+            buildRecentRun({
+              runId: 9,
+              taskId: "spark-task-123",
+              runType: "spark_compare",
+              sourceRunId: 3,
+              status: "queued",
+              engine: "spark",
+              progressStage: "queued",
+              progressPercent: 0,
+            }),
+            buildRecentRun({ runId: 3 }),
+          ],
         }),
-      );
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          runs: [
+            { ...buildRecentRun({ runId: 3 }) },
+            {
+              ...buildRecentRun({
+                runId: 9,
+                taskId: "spark-task-123",
+                runType: "spark_compare",
+                sourceRunId: 3,
+                status: "completed",
+                engine: "spark",
+                progressStage: "completed",
+                progressPercent: 100,
+              }),
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse(sparkComparisonRun));
 
     vi.stubGlobal("fetch", fetchMock);
 
@@ -488,15 +558,15 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: /Browse files/i }));
     await waitFor(() => expect(screen.getByText("Processing workbench")).toBeInTheDocument());
 
-    fireEvent.click(screen.getByRole("button", { name: /Run Spark comparison/i }));
-    await waitFor(() => expect(screen.getByText("Spark comparison")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /Process file/i }));
+    await waitFor(() => expect(screen.getByText(/Preview rows 1-2 of 2/i)).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /Compare with Spark \(experimental\)/i }));
+    await waitFor(() => expect(screen.getByText("Compare with Spark")).toBeInTheDocument());
     expect(screen.getByText("Experimental comparison mode.")).toBeInTheDocument();
+    expect(screen.getByText("Spark preview")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /Edit connection/i }));
-    fireEvent.change(screen.getByLabelText(/^Bucket$/i), { target: { value: "demo-bucket" } });
-    fireEvent.click(screen.getByRole("button", { name: /Browse files/i }));
-    await waitFor(() => expect(screen.getByText("Processing workbench")).toBeInTheDocument());
-
-    expect(screen.getByRole("button", { name: /Run Spark comparison/i })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: /workbook\.xlsx/i }));
+    expect(screen.queryByRole("button", { name: /Compare with Spark \(experimental\)/i })).not.toBeInTheDocument();
   });
 });
