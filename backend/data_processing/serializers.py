@@ -60,11 +60,26 @@ class ProcessFileAsyncRequestSerializer(ProcessFileRequestSerializer):
 
 
 class SparkCompareRequestSerializer(S3CredentialsSerializer):
-    """Request body for the experimental Spark CSV comparison mode."""
+    """Request body for the experimental Spark comparison mode."""
 
-    object_key = serializers.CharField(max_length=1024, trim_whitespace=True)
+    source_run_id = serializers.IntegerField(required=False, min_value=1)
+    object_key = serializers.CharField(max_length=1024, trim_whitespace=True, required=False)
     page = serializers.IntegerField(required=False, min_value=1, default=1)
     page_size = serializers.IntegerField(required=False, min_value=1, max_value=500, default=100)
+
+    def validate(self, attrs):
+        """Allow either the new source-run flow or the legacy direct comparison payload."""
+
+        if "source_run_id" not in attrs and "object_key" not in attrs:
+            raise serializers.ValidationError("Provide either a source_run_id or an object_key for Spark comparison.")
+        return attrs
+
+
+class RunListRequestSerializer(serializers.Serializer):
+    """Query params for listing recent processing runs."""
+
+    object_key = serializers.CharField(max_length=1024, trim_whitespace=True, required=False)
+    limit = serializers.IntegerField(required=False, min_value=1, max_value=20, default=5)
 
 
 class PreviewPageRequestSerializer(S3CredentialsSerializer):

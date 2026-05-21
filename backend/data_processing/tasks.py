@@ -6,7 +6,12 @@ from celery import shared_task
 
 from data_processing.models import ProcessingRun
 from data_processing.services.processing import ProcessingServiceError, S3Credentials, process_s3_object
-from data_processing.services.run_tracking import mark_run_completed, mark_run_failed, mark_run_processing
+from data_processing.services.run_tracking import (
+    mark_run_comparison_completed,
+    mark_run_completed,
+    mark_run_failed,
+    mark_run_processing,
+)
 from data_processing.services.spark_processing import run_spark_csv_comparison
 
 
@@ -65,20 +70,7 @@ def run_spark_comparison(self, *, run_id: int, request_payload: dict[str, object
             page=int(request_payload.get("page", 1)),
             page_size=int(request_payload.get("page_size", 100)),
         )
-        mark_run_completed(
-            run,
-            {
-                "rowCount": result["rowCount"],
-                "schema": result["sparkSchema"],
-                "previewColumns": result["previewColumns"],
-                "previewRows": result["previewRows"],
-                "previewPage": result["previewPage"],
-                "warnings": result["notes"],
-                "processingMetadata": result["processingMetadata"],
-                "selectedSheet": "",
-                "fileType": result["fileType"],
-            },
-        )
+        mark_run_comparison_completed(run, result)
         return {"runId": run.id, "status": run.status}
     except (ProcessingServiceError, ValueError) as exc:
         mark_run_failed(run, str(exc))

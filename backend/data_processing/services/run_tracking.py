@@ -9,32 +9,51 @@ from django.utils import timezone
 from data_processing.models import ProcessingRun
 
 
-def serialize_run(run: ProcessingRun) -> dict[str, Any]:
-    """Return the stable API payload for one tracked processing run."""
+def _serialize_common_run_fields(run: ProcessingRun) -> dict[str, Any]:
+    """Return lifecycle fields shared by process and comparison runs."""
 
-    payload: dict[str, Any] = {
+    return {
         "runId": run.id,
         "taskId": run.task_id,
+        "runType": run.run_type,
+        "sourceRunId": run.source_run_id,
         "status": run.status,
         "engine": run.engine,
+        "bucket": run.bucket,
+        "objectKey": run.object_key,
         "progressStage": run.progress_stage,
         "progressPercent": run.progress_percent,
         "errorMessage": run.error_message,
+        "createdAt": run.created_at.isoformat(),
+        "startedAt": run.started_at.isoformat() if run.started_at else None,
+        "completedAt": run.completed_at.isoformat() if run.completed_at else None,
+        "fileType": run.file_type,
+        "selectedSheet": run.sheet_name,
     }
-    if run.status == "completed":
-        payload.update(
-            {
-                "rowCount": run.row_count,
-                "schema": run.schema,
-                "previewColumns": run.preview_columns,
-                "previewRows": run.preview_rows,
-                "previewPage": run.preview_page,
-                "warnings": run.warnings,
-                "processingMetadata": run.processing_metadata,
-                "selectedSheet": run.sheet_name,
-                "fileType": run.file_type,
-            }
-        )
+
+
+def serialize_run(run: ProcessingRun, *, include_payload: bool = True) -> dict[str, Any]:
+    """Return the stable API payload for one tracked processing run."""
+
+    payload = _serialize_common_run_fields(run)
+    if not include_payload or run.status != "completed":
+        return payload
+
+    if run.run_type == "spark_compare":
+        payload["sparkComparison"] = run.comparison_payload
+        return payload
+
+    payload.update(
+        {
+            "rowCount": run.row_count,
+            "schema": run.schema,
+            "previewColumns": run.preview_columns,
+            "previewRows": run.preview_rows,
+            "previewPage": run.preview_page,
+            "warnings": run.warnings,
+            "processingMetadata": run.processing_metadata,
+        }
+    )
     return payload
 
 
@@ -90,6 +109,7 @@ def mark_run_completed(run: ProcessingRun, result: dict[str, Any]) -> Processing
     run.preview_columns = result["previewColumns"]
     run.preview_rows = result["previewRows"]
     run.preview_page = result["previewPage"]
+    run.comparison_payload = {}
     run.processing_metadata = result["processingMetadata"]
     run.sheet_name = result["selectedSheet"]
     run.file_type = result["fileType"]
@@ -108,9 +128,47 @@ def mark_run_completed(run: ProcessingRun, result: dict[str, Any]) -> Processing
             "preview_columns",
             "preview_rows",
             "preview_page",
+            "comparison_payload",
             "processing_metadata",
             "sheet_name",
             "file_type",
+            "started_at",
+            "completed_at",
+        ]
+    )
+    return run
+
+
+def mark_run_comparison_completed(run: ProcessingRun, result: dict[str, Any]) -> ProcessingRun:
+    """Persist a completed Spark comparison without flattening it into the Pandas shape."""
+
+    run.status = "completed"
+    run.error_message = ""
+    run.progress_stage = "completed"
+    run.progress_percent = 100
+    run.row_count = result["rowCount"]
+    run.warnings = result["notes"]
+    run.preview_columns = result["previewColumns"]
+    run.preview_rows = result["previewRows"]
+    run.preview_page = result["previewPage"]
+    run.comparison_payload = result
+    run.processing_metadata = result["processingMetadata"]
+    if run.started_at is None:
+        run.started_at = timezone.now()
+    run.completed_at = timezone.now()
+    run.save(
+        update_fields=[
+            "status",
+            "error_message",
+            "progress_stage",
+            "progress_percent",
+            "row_count",
+            "warnings",
+            "preview_columns",
+            "preview_rows",
+            "preview_page",
+            "comparison_payload",
+            "processing_metadata",
             "started_at",
             "completed_at",
         ]

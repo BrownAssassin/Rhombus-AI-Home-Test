@@ -16,11 +16,17 @@ class ProcessingRun(models.Model):
         ("pandas", "Pandas"),
         ("spark", "Spark"),
     ]
+    RUN_TYPE_CHOICES = [
+        ("process", "Process"),
+        ("spark_compare", "Spark Compare"),
+    ]
 
     bucket = models.CharField(max_length=255)
     object_key = models.CharField(max_length=1024)
     file_type = models.CharField(max_length=32)
     sheet_name = models.CharField(max_length=255, blank=True)
+    run_type = models.CharField(max_length=32, choices=RUN_TYPE_CHOICES, default="process")
+    source_run = models.ForeignKey("self", null=True, blank=True, on_delete=models.SET_NULL)
     status = models.CharField(max_length=16, choices=STATUS_CHOICES, default="queued")
     engine = models.CharField(max_length=16, choices=ENGINE_CHOICES, default="pandas")
     task_id = models.CharField(max_length=255, blank=True)
@@ -33,6 +39,7 @@ class ProcessingRun(models.Model):
     preview_columns = models.JSONField(default=list)
     preview_rows = models.JSONField(default=list)
     preview_page = models.JSONField(default=dict)
+    comparison_payload = models.JSONField(default=dict)
     processing_metadata = models.JSONField(default=dict)
     started_at = models.DateTimeField(null=True, blank=True)
     completed_at = models.DateTimeField(null=True, blank=True)
@@ -41,7 +48,7 @@ class ProcessingRun(models.Model):
     class Meta:
         """Keep the newest processing runs first in the admin and API lookups."""
 
-        ordering = ["-created_at"]
+        ordering = ["-created_at", "-id"]
 
     def __str__(self) -> str:
         """Return a readable identifier for the admin and shell."""

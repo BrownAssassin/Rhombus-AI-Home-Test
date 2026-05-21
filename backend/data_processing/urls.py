@@ -7,6 +7,7 @@ from .views import (
     PreviewPageView,
     ProcessDataAsyncView,
     ProcessDataView,
+    RunListView,
     RunStatusView,
     S3FileListView,
     SparkCompareView,
@@ -19,6 +20,7 @@ urlpatterns = [
     path("data/process", ProcessDataView.as_view(), name="process-data"),
     path("data/process-async", ProcessDataAsyncView.as_view(), name="process-data-async"),
     path("data/preview", PreviewPageView.as_view(), name="preview-page"),
+    path("data/runs", RunListView.as_view(), name="run-list"),
     path("data/runs/<int:run_id>", RunStatusView.as_view(), name="run-status"),
     path("data/spark-compare", SparkCompareView.as_view(), name="spark-compare"),
 ]

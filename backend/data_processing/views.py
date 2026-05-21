@@ -13,6 +13,7 @@ from .serializers import (
     PreviewPageRequestSerializer,
     ProcessFileAsyncRequestSerializer,
     ProcessFileRequestSerializer,
+    RunListRequestSerializer,
     SparkCompareRequestSerializer,
 )
 from .services.processing import (
@@ -25,7 +26,7 @@ from .services.processing import (
 )
 from .services.run_tracking import mark_run_failed, mark_run_queued, serialize_run
 from .services.spark_processing import run_spark_csv_comparison
-from .tasks import process_s3_object_async
+from .tasks import process_s3_object_async, run_spark_comparison
 
 
 def _build_credentials(validated_data: dict) -> S3Credentials:
@@ -136,6 +137,7 @@ class ProcessDataView(APIView):
             object_key=result["objectKey"],
             file_type=result["fileType"],
             sheet_name=result["selectedSheet"],
+            run_type="process",
             status="completed",
             engine="pandas",
             progress_stage="completed",
@@ -190,6 +192,7 @@ class ProcessDataAsyncView(APIView):
             object_key=validated_data["object_key"],
             file_type=file_type,
             sheet_name=validated_data.get("sheet_name", ""),
+            run_type="process",
             status="queued",
             engine="pandas",
             progress_stage="queued",
@@ -225,6 +228,7 @@ class ProcessDataAsyncView(APIView):
             {
                 "runId": run.id,
                 "taskId": task_result.id,
+                "runType": run.run_type,
                 "status": run.status,
                 "engine": run.engine,
             },
@@ -250,6 +254,27 @@ class RunStatusView(APIView):
         return Response(serialize_run(run))
 
 
+class RunListView(APIView):
+    """Return a compact list of recent runs for the workbench jobs tray."""
+
+    authentication_classes = []
+    permission_classes = []
+
+    def get(self, request):
+        """List recent processing or comparison runs, newest first."""
+
+        serializer = RunListRequestSerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+        validated_data = serializer.validated_data
+
+        runs = ProcessingRun.objects.all()
+        if "object_key" in validated_data:
+            runs = runs.filter(object_key=validated_data["object_key"])
+        runs = runs[: validated_data["limit"]]
+
+        return Response({"runs": [serialize_run(run, include_payload=False) for run in runs]})
+
+
 class SparkCompareView(APIView):
     """Run the experimental PySpark CSV comparison path."""
 
@@ -263,6 +288,79 @@ class SparkCompareView(APIView):
         serializer.is_valid(raise_exception=True)
         validated_data = serializer.validated_data
         credentials = _build_credentials(validated_data)
+
+        source_run_id = validated_data.get("source_run_id")
+        if source_run_id is not None:
+            source_run = ProcessingRun.objects.filter(pk=source_run_id).first()
+            if source_run is None:
+                return Response(
+                    {"detail": "The requested source processing run could not be found.", "code": "run_not_found"},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            if source_run.run_type != "process":
+                return Response(
+                    {"detail": "Spark comparisons must reference a completed Pandas processing run.", "code": "invalid_source_run"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if source_run.status != "completed":
+                return Response(
+                    {"detail": "The requested source processing run has not completed yet.", "code": "source_run_not_completed"},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            if source_run.file_type != "csv":
+                return Response(
+                    {"detail": "Spark comparison currently supports CSV files only.", "code": "unsupported_file_type"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            comparison_run = ProcessingRun.objects.create(
+                bucket=source_run.bucket,
+                object_key=source_run.object_key,
+                file_type=source_run.file_type,
+                sheet_name=source_run.sheet_name,
+                run_type="spark_compare",
+                source_run=source_run,
+                status="queued",
+                engine="spark",
+                progress_stage="queued",
+                progress_percent=0,
+            )
+            request_payload = {
+                "access_key_id": credentials.access_key_id,
+                "secret_access_key": credentials.secret_access_key,
+                "session_token": credentials.session_token,
+                "region": credentials.region,
+                "bucket": credentials.bucket,
+                "prefix": credentials.prefix,
+                "object_key": source_run.object_key,
+                "page": validated_data["page"],
+                "page_size": validated_data["page_size"],
+            }
+
+            try:
+                task_result = run_spark_comparison.delay(run_id=comparison_run.id, request_payload=request_payload)
+            except Exception:
+                mark_run_failed(comparison_run, "Spark comparison could not be queued in the current environment.")
+                return Response(
+                    {
+                        "detail": "Spark comparison could not be queued in the current environment.",
+                        "code": "task_queue_error",
+                    },
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
+
+            mark_run_queued(comparison_run, task_id=task_result.id, engine="spark")
+            return Response(
+                {
+                    "runId": comparison_run.id,
+                    "taskId": task_result.id,
+                    "status": comparison_run.status,
+                    "engine": comparison_run.engine,
+                    "runType": comparison_run.run_type,
+                    "sourceRunId": comparison_run.source_run_id,
+                },
+                status=status.HTTP_202_ACCEPTED,
+            )
 
         try:
             result = run_spark_csv_comparison(

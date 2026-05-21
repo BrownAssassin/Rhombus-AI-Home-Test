@@ -123,9 +123,11 @@ class DataProcessingApiTests(TestCase):
 
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.json()["taskId"], "task-123")
+        self.assertEqual(response.json()["runType"], "process")
         run = ProcessingRun.objects.get()
         self.assertEqual(run.status, "queued")
         self.assertEqual(run.engine, "pandas")
+        self.assertEqual(run.run_type, "process")
         self.assertEqual(run.progress_stage, "queued")
         self.assertEqual(run.task_id, "task-123")
         self.assertEqual(mocked_delay.call_args.kwargs["request_payload"]["object_key"], "incoming/sample.csv")
@@ -338,6 +340,7 @@ class DataProcessingApiTests(TestCase):
             object_key="incoming/sample.csv",
             file_type="csv",
             sheet_name="",
+            run_type="process",
             status="completed",
             engine="pandas",
             task_id="task-123",
@@ -376,7 +379,100 @@ class DataProcessingApiTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "completed")
+        self.assertEqual(response.json()["runType"], "process")
         self.assertEqual(response.json()["previewRows"], [{"Score": 90}, {"Score": 75}])
+
+    def test_run_list_endpoint_returns_recent_runs_with_optional_filter(self) -> None:
+        """List recent runs in newest-first order for the current workbench file."""
+
+        other_run = ProcessingRun.objects.create(
+            bucket="demo-bucket",
+            object_key="incoming/other.csv",
+            file_type="csv",
+            run_type="process",
+            status="completed",
+            engine="pandas",
+        )
+        earliest_matching_run = ProcessingRun.objects.create(
+            bucket="demo-bucket",
+            object_key="incoming/sample.csv",
+            file_type="csv",
+            run_type="spark_compare",
+            status="queued",
+            engine="spark",
+        )
+        latest_matching_run = ProcessingRun.objects.create(
+            bucket="demo-bucket",
+            object_key="incoming/sample.csv",
+            file_type="csv",
+            run_type="process",
+            status="completed",
+            engine="pandas",
+        )
+
+        response = self.client.get("/api/data/runs", {"object_key": "incoming/sample.csv", "limit": 2})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["runs"]
+        self.assertEqual([item["runId"] for item in payload], [latest_matching_run.id, earliest_matching_run.id])
+        self.assertEqual(payload[0]["runType"], "process")
+        self.assertEqual(payload[1]["runType"], "spark_compare")
+        self.assertNotIn(other_run.id, [item["runId"] for item in payload])
+
+    def test_spark_compare_endpoint_queues_a_comparison_job_for_completed_csv_runs(self) -> None:
+        """Queue Spark comparisons against completed Pandas runs."""
+
+        source_run = ProcessingRun.objects.create(
+            bucket="demo-bucket",
+            object_key="incoming/sample.csv",
+            file_type="csv",
+            run_type="process",
+            status="completed",
+            engine="pandas",
+        )
+        payload = {
+            **self.credentials_payload,
+            "source_run_id": source_run.id,
+            "page": 1,
+            "page_size": 25,
+        }
+
+        with patch(
+            "data_processing.views.run_spark_comparison.delay",
+            return_value=SimpleNamespace(id="spark-task-123"),
+        ) as mocked_delay:
+            response = self.client.post("/api/data/spark-compare", payload, format="json")
+
+        self.assertEqual(response.status_code, 202)
+        queued_run = ProcessingRun.objects.exclude(pk=source_run.id).get()
+        self.assertEqual(queued_run.run_type, "spark_compare")
+        self.assertEqual(queued_run.source_run_id, source_run.id)
+        self.assertEqual(queued_run.engine, "spark")
+        self.assertEqual(response.json()["sourceRunId"], source_run.id)
+        self.assertEqual(mocked_delay.call_args.kwargs["request_payload"]["object_key"], "incoming/sample.csv")
+
+    def test_spark_compare_endpoint_rejects_incomplete_source_runs(self) -> None:
+        """Prevent Spark comparisons from starting until the source run is done."""
+
+        source_run = ProcessingRun.objects.create(
+            bucket="demo-bucket",
+            object_key="incoming/sample.csv",
+            file_type="csv",
+            run_type="process",
+            status="processing",
+            engine="pandas",
+        )
+        payload = {
+            **self.credentials_payload,
+            "source_run_id": source_run.id,
+            "page": 1,
+            "page_size": 25,
+        }
+
+        response = self.client.post("/api/data/spark-compare", payload, format="json")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["code"], "source_run_not_completed")
 
     def test_spark_compare_endpoint_rejects_excel_requests(self) -> None:
         """Keep the experimental Spark path scoped to CSV files only."""
@@ -392,6 +488,44 @@ class DataProcessingApiTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["code"], "unsupported_file_type")
+
+    def test_run_status_endpoint_returns_comparison_payload_for_completed_spark_runs(self) -> None:
+        """Expose completed Spark comparisons under a dedicated payload key."""
+
+        run = ProcessingRun.objects.create(
+            bucket="demo-bucket",
+            object_key="incoming/sample.csv",
+            file_type="csv",
+            run_type="spark_compare",
+            status="completed",
+            engine="spark",
+            comparison_payload={
+                "engine": "spark",
+                "fileType": "csv",
+                "objectKey": "incoming/sample.csv",
+                "rowCount": 2,
+                "sparkSchema": [],
+                "previewColumns": ["Score"],
+                "previewRows": [{"Score": "90"}],
+                "previewPage": {
+                    "page": 1,
+                    "pageSize": 25,
+                    "totalRows": 2,
+                    "totalPages": 1,
+                    "hasPreviousPage": False,
+                    "hasNextPage": False,
+                },
+                "processingMetadata": {"durationMs": 20.0, "pageSize": 25, "sparkMaster": "local[*]"},
+                "notes": ["Experimental comparison mode."],
+            },
+        )
+
+        response = self.client.get(f"/api/data/runs/{run.id}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["runType"], "spark_compare")
+        self.assertIn("sparkComparison", response.json())
+        self.assertNotIn("schema", response.json())
 
     def test_run_status_endpoint_returns_failure_details(self) -> None:
         """Surface terminal task failures through the polling endpoint."""
