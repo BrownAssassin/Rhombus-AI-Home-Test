@@ -284,6 +284,94 @@ button {
   background: rgba(255, 255, 255, 0.03);
 }
 
+.jobs-tray {
+  margin-bottom: 1.25rem;
+}
+
+.job-list {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.job-card {
+  display: grid;
+  gap: 0.7rem;
+  padding: 1rem;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.job-card-current {
+  border-color: rgba(72, 145, 193, 0.42);
+  background: rgba(72, 145, 193, 0.09);
+}
+
+.job-card-header,
+.job-progress-row,
+.job-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.job-title,
+.job-meta,
+.job-error {
+  margin: 0;
+}
+
+.job-title {
+  font-weight: 700;
+}
+
+.job-meta {
+  color: rgba(248, 244, 234, 0.62);
+  font-size: 0.86rem;
+}
+
+.job-progress-row {
+  color: rgba(248, 244, 234, 0.78);
+  font-size: 0.9rem;
+}
+
+.job-status {
+  padding: 0.35rem 0.75rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 0.82rem;
+  text-transform: capitalize;
+}
+
+.job-status-completed {
+  background: rgba(98, 182, 111, 0.18);
+}
+
+.job-status-processing,
+.job-status-queued {
+  background: rgba(242, 179, 107, 0.18);
+}
+
+.job-status-failed {
+  background: rgba(211, 85, 85, 0.2);
+}
+
+.job-actions {
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.job-actions .secondary-button {
+  min-width: 0;
+  padding-inline: 1rem;
+}
+
+.job-error {
+  color: #f0a6a6;
+  font-size: 0.9rem;
+}
+
 .advanced-section h3,
 .run-status-panel h3 {
   margin: 0;

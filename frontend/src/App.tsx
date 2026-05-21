@@ -1,7 +1,9 @@
 import { startTransition, useEffect, useState, type JSX } from "react";
 
 import {
+  ApiError,
   fetchPreviewPage,
+  fetchRecentRuns,
   fetchRunStatus,
   fetchS3Files,
   processFile,
@@ -12,15 +14,17 @@ import type {
   ColumnInferenceResult,
   ProcessResponse,
   RunStatusResponse,
+  RunSummary,
   S3CredentialsInput,
   S3File,
   SparkComparisonResponse,
 } from "./types";
 
 type ViewState = "connection" | "workbench";
-type BusyState = "idle" | "listing" | "processing" | "queueing" | "paging" | "spark";
+type BusyState = "idle" | "listing" | "processing" | "queueing" | "paging" | "spark" | "loadingRun";
 
 const PAGE_SIZE_OPTIONS = [25, 50, 100] as const;
+const RECENT_RUN_LIMIT = 6;
 
 const defaultCredentials: S3CredentialsInput = {
   access_key_id: "",
@@ -46,6 +50,10 @@ function schemaToOverrides(schema: ColumnInferenceResult[]): Record<string, stri
   return Object.fromEntries(schema.map((column) => [column.column, column.inferred_type]));
 }
 
+function isRunActive(run: RunSummary): boolean {
+  return run.status === "queued" || run.status === "processing";
+}
+
 function formatBytes(value: number): string {
   if (value < 1024) {
     return `${value} B`;
@@ -54,6 +62,18 @@ function formatBytes(value: number): string {
     return `${(value / 1024).toFixed(1)} KB`;
   }
   return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatRunType(runType: RunSummary["runType"]): string {
+  return runType === "spark_compare" ? "Spark comparison" : "Process";
+}
+
+function formatRunMoment(run: RunSummary): string {
+  const timestamp = run.completedAt ?? run.startedAt ?? run.createdAt;
+  if (!timestamp) {
+    return "Just now";
+  }
+  return new Date(timestamp).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 
 function formatColumnWarnings(schema: ColumnInferenceResult[]): JSX.Element | null {
@@ -88,6 +108,7 @@ function LoadingNotice({ message }: { message: string }): JSX.Element {
 function buildProcessResponseFromRun(run: RunStatusResponse): ProcessResponse | null {
   if (
     run.status !== "completed" ||
+    run.runType !== "process" ||
     !run.schema ||
     !run.previewColumns ||
     !run.previewRows ||
@@ -111,9 +132,60 @@ function buildProcessResponseFromRun(run: RunStatusResponse): ProcessResponse | 
       durationMs: run.processingMetadata.durationMs,
       previewRowLimit: run.processingMetadata.previewRowLimit ?? 100,
       chunkSize: run.processingMetadata.chunkSize ?? null,
+      appliedOverrides: run.processingMetadata.appliedOverrides ?? {},
     },
     selectedSheet: run.selectedSheet ?? "",
     fileType: run.fileType,
+  };
+}
+
+function buildQueuedRunSummary(args: {
+  runId: number;
+  taskId: string;
+  runType: "process" | "spark_compare";
+  sourceRunId?: number | null;
+  engine: "pandas" | "spark";
+  bucket: string;
+  objectKey: string;
+  fileType?: "csv" | "excel";
+  selectedSheet?: string;
+}): RunSummary {
+  const now = new Date().toISOString();
+  return {
+    runId: args.runId,
+    taskId: args.taskId,
+    runType: args.runType,
+    sourceRunId: args.sourceRunId ?? null,
+    status: "queued",
+    engine: args.engine,
+    bucket: args.bucket,
+    objectKey: args.objectKey,
+    progressStage: "queued",
+    progressPercent: 0,
+    errorMessage: "",
+    createdAt: now,
+    startedAt: null,
+    completedAt: null,
+    fileType: args.fileType,
+    selectedSheet: args.selectedSheet ?? "",
+  };
+}
+
+function buildEffectiveOverrides(
+  schema: ColumnInferenceResult[],
+  overrides: Record<string, string>,
+): {
+  rows: Array<{ column: string; target_type: string }>;
+  appliedOverrideMap: Record<string, string>;
+} {
+  const baselineOverrides = schemaToOverrides(schema);
+  const rows = Object.entries(overrides)
+    .filter(([column, targetType]) => targetType !== baselineOverrides[column])
+    .map(([column, target_type]) => ({ column, target_type }));
+
+  return {
+    rows,
+    appliedOverrideMap: Object.fromEntries(rows.map(({ column, target_type }) => [column, target_type])),
   };
 }
 
@@ -130,9 +202,11 @@ export default function App() {
   const [rowsPerPage, setRowsPerPage] = useState<number>(25);
   const [currentPage, setCurrentPage] = useState<number>(1);
   const [busyState, setBusyState] = useState<BusyState>("idle");
-  const [activeRun, setActiveRun] = useState<RunStatusResponse | null>(null);
+  const [recentRuns, setRecentRuns] = useState<RunSummary[]>([]);
+  const [pendingProcessRunId, setPendingProcessRunId] = useState<number | null>(null);
   const [sparkComparison, setSparkComparison] = useState<SparkComparisonResponse | null>(null);
   const [error, setError] = useState("");
+  const [fallbackNotice, setFallbackNotice] = useState("");
 
   const selectedFile = files.find((item) => item.key === selectedKey) ?? null;
   const displayedSchema = detectedSchema.length > 0 ? detectedSchema : result?.schema ?? [];
@@ -154,70 +228,127 @@ export default function App() {
   const changedOverrideCount = displayedSchema.filter(
     (column) => (overrides[column.column] ?? column.inferred_type) !== column.inferred_type,
   ).length;
-  const runIsActive = activeRun?.status === "queued" || activeRun?.status === "processing";
+  const runIsActive = recentRuns.some(isRunActive);
+  const latestActiveRun = recentRuns.find(isRunActive) ?? null;
   const busyMessage = {
     idle: "",
     listing: "Loading supported files from S3...",
     processing: "Profiling the dataset and generating the processed preview...",
-    queueing: "Queueing a background processing job...",
+    queueing: "Starting a tracked background job...",
     paging: "Loading the requested preview page...",
     spark: "Running the experimental Spark comparison...",
+    loadingRun: "Loading the selected run result...",
   }[busyState];
 
   useEffect(() => {
-    if (!activeRun || !runIsActive) {
+    if (view !== "workbench" || !selectedKey) {
+      setRecentRuns([]);
       return undefined;
     }
 
     let isCancelled = false;
-    const runId = activeRun.runId;
 
-    const pollRun = async () => {
+    const loadRuns = async () => {
       try {
-        const nextRun = await fetchRunStatus(runId);
-        if (isCancelled) {
-          return;
-        }
-
-        setActiveRun(nextRun);
-        if (nextRun.status === "completed") {
-          const nextResult = buildProcessResponseFromRun(nextRun);
-          if (nextResult) {
-            setResult(nextResult);
-            setDetectedSchema(nextResult.schema);
-            setOverrides(schemaToOverrides(nextResult.schema));
-            setCurrentPage(nextResult.previewPage.page);
-            setRowsPerPage(nextResult.previewPage.pageSize);
-            setSparkComparison(null);
-          }
-        } else if (nextRun.status === "failed") {
-          setError(nextRun.errorMessage || "The background processing job failed.");
+        const nextRuns = await fetchRecentRuns({ objectKey: selectedKey, limit: RECENT_RUN_LIMIT });
+        if (!isCancelled) {
+          setRecentRuns(nextRuns);
         }
       } catch (caughtError) {
         if (!isCancelled) {
-          setError(caughtError instanceof Error ? caughtError.message : "Unable to refresh the run status.");
+          setError(caughtError instanceof Error ? caughtError.message : "Unable to load the recent job list.");
         }
       }
     };
 
-    const intervalId = window.setInterval(() => {
-      void pollRun();
-    }, 2500);
-    void pollRun();
+    void loadRuns();
 
     return () => {
       isCancelled = true;
-      window.clearInterval(intervalId);
     };
-  }, [activeRun?.runId, activeRun?.status, runIsActive]);
+  }, [selectedKey, view]);
+
+  useEffect(() => {
+    if (view !== "workbench" || !selectedKey || !runIsActive) {
+      return undefined;
+    }
+
+    let isCancelled = false;
+    let timeoutId: number | undefined;
+
+    const pollRuns = async () => {
+      let nextRuns: RunSummary[] = [];
+
+      try {
+        nextRuns = await fetchRecentRuns({ objectKey: selectedKey, limit: RECENT_RUN_LIMIT });
+        if (isCancelled) {
+          return;
+        }
+
+        setRecentRuns(nextRuns);
+
+        if (pendingProcessRunId !== null) {
+          const pendingRun = nextRuns.find((run) => run.runId === pendingProcessRunId);
+          if (pendingRun?.status === "completed") {
+            const nextRun = await fetchRunStatus(pendingRun.runId);
+            if (isCancelled) {
+              return;
+            }
+            const nextResult = buildProcessResponseFromRun(nextRun);
+            if (nextResult) {
+              applyProcessResult(nextResult, nextResult.processingMetadata.appliedOverrides ?? {});
+            }
+            setPendingProcessRunId(null);
+          } else if (pendingRun?.status === "failed") {
+            setError(pendingRun.errorMessage || "The background processing job failed.");
+            setPendingProcessRunId(null);
+          }
+        }
+      } catch (caughtError) {
+        if (!isCancelled) {
+          setError(caughtError instanceof Error ? caughtError.message : "Unable to refresh the recent job list.");
+        }
+      } finally {
+        if (!isCancelled && nextRuns.some(isRunActive)) {
+          const nextInterval = nextRuns.some((run) => run.status === "queued") ? 1200 : 2500;
+          timeoutId = window.setTimeout(() => {
+            void pollRuns();
+          }, nextInterval);
+        }
+      }
+    };
+
+    void pollRuns();
+
+    return () => {
+      isCancelled = true;
+      if (timeoutId) {
+        window.clearTimeout(timeoutId);
+      }
+    };
+  }, [pendingProcessRunId, runIsActive, selectedKey, view]);
+
+  function applyProcessResult(nextResult: ProcessResponse, appliedOverrides: Record<string, string>) {
+    setResult(nextResult);
+    setCurrentPage(nextResult.previewPage.page);
+    setRowsPerPage(nextResult.previewPage.pageSize);
+    setDetectedSchema(nextResult.schema);
+    setOverrides({
+      ...schemaToOverrides(nextResult.schema),
+      ...appliedOverrides,
+    });
+    setSparkComparison(null);
+  }
 
   function resetWorkbenchState() {
     setResult(null);
     setDetectedSchema([]);
     setOverrides({});
     setCurrentPage(1);
-    setActiveRun(null);
+    setRecentRuns([]);
+    setPendingProcessRunId(null);
     setSparkComparison(null);
+    setFallbackNotice("");
   }
 
   function updateCredentialField(field: keyof S3CredentialsInput, value: string) {
@@ -229,6 +360,10 @@ export default function App() {
     }
   }
 
+  function upsertQueuedRun(queuedRun: RunSummary) {
+    setRecentRuns((current) => [queuedRun, ...current.filter((run) => run.runId !== queuedRun.runId)].slice(0, RECENT_RUN_LIMIT));
+  }
+
   async function handleBrowseFiles() {
     if (!hasConnectionDetails) {
       setError(`Enter ${missingConnectionFields.join(", ")} before browsing S3 files.`);
@@ -237,6 +372,7 @@ export default function App() {
 
     setBusyState("listing");
     setError("");
+    setFallbackNotice("");
     resetWorkbenchState();
 
     try {
@@ -259,6 +395,46 @@ export default function App() {
     }
   }
 
+  async function refreshRecentRuns(suppressErrors = false) {
+    if (!selectedKey) {
+      setRecentRuns([]);
+      return [];
+    }
+
+    try {
+      const nextRuns = await fetchRecentRuns({ objectKey: selectedKey, limit: RECENT_RUN_LIMIT });
+      setRecentRuns(nextRuns);
+      return nextRuns;
+    } catch (caughtError) {
+      if (!suppressErrors) {
+        setError(caughtError instanceof Error ? caughtError.message : "Unable to refresh the recent job list.");
+      }
+      return [];
+    }
+  }
+
+  async function runSynchronousProcess(appliedOverrideMap: Record<string, string>) {
+    setBusyState("processing");
+
+    try {
+      const nextResult = await processFile({
+        credentials,
+        objectKey: selectedKey,
+        sheetName,
+        previewRowLimit: rowsPerPage,
+        overrides: Object.entries(appliedOverrideMap).map(([column, target_type]) => ({ column, target_type })),
+      });
+
+      applyProcessResult(nextResult, appliedOverrideMap);
+      setPendingProcessRunId(null);
+      await refreshRecentRuns(true);
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "Unable to process file.");
+    } finally {
+      setBusyState("idle");
+    }
+  }
+
   async function handleProcessFile() {
     if (!hasConnectionDetails) {
       setError(`Enter ${missingConnectionFields.join(", ")} before processing a file.`);
@@ -269,64 +445,14 @@ export default function App() {
       return;
     }
 
-    setBusyState("processing");
-    setError("");
-    setActiveRun(null);
-    setSparkComparison(null);
-
-    try {
-      const baselineSchema = displayedSchema;
-      const baselineOverrides = schemaToOverrides(baselineSchema);
-      const effectiveOverrides = Object.entries(overrides)
-        .filter(([column, targetType]) => targetType !== baselineOverrides[column])
-        .map(([column, target_type]) => ({ column, target_type }));
-      const nextResult = await processFile({
-        credentials,
-        objectKey: selectedKey,
-        sheetName,
-        previewRowLimit: rowsPerPage,
-        overrides: effectiveOverrides,
-      });
-
-      setResult(nextResult);
-      setCurrentPage(nextResult.previewPage.page);
-      setRowsPerPage(nextResult.previewPage.pageSize);
-      if (baselineSchema.length === 0 || effectiveOverrides.length === 0) {
-        setDetectedSchema(nextResult.schema);
-        setOverrides(schemaToOverrides(nextResult.schema));
-      } else {
-        setOverrides({
-          ...baselineOverrides,
-          ...Object.fromEntries(effectiveOverrides.map(({ column, target_type }) => [column, target_type])),
-        });
-      }
-    } catch (caughtError) {
-      setError(caughtError instanceof Error ? caughtError.message : "Unable to process file.");
-    } finally {
-      setBusyState("idle");
-    }
-  }
-
-  async function handleQueueBackgroundJob() {
-    if (!hasConnectionDetails) {
-      setError(`Enter ${missingConnectionFields.join(", ")} before processing a file.`);
-      return;
-    }
-    if (!selectedKey) {
-      setError("Choose a file before queueing a background job.");
-      return;
-    }
-
     setBusyState("queueing");
     setError("");
+    setFallbackNotice("");
     setSparkComparison(null);
 
+    const { rows: effectiveOverrides, appliedOverrideMap } = buildEffectiveOverrides(displayedSchema, overrides);
+
     try {
-      const baselineSchema = displayedSchema;
-      const baselineOverrides = schemaToOverrides(baselineSchema);
-      const effectiveOverrides = Object.entries(overrides)
-        .filter(([column, targetType]) => targetType !== baselineOverrides[column])
-        .map(([column, target_type]) => ({ column, target_type }));
       const queuedRun = await processFileAsync({
         credentials,
         objectKey: selectedKey,
@@ -334,20 +460,30 @@ export default function App() {
         previewRowLimit: rowsPerPage,
         overrides: effectiveOverrides,
       });
-      setResult(null);
-      setDetectedSchema([]);
-      setOverrides({});
-      setCurrentPage(1);
-      setActiveRun({
-        ...queuedRun,
-        progressStage: "queued",
-        progressPercent: 0,
-        errorMessage: "",
-      });
+
+      setPendingProcessRunId(queuedRun.runId);
+      upsertQueuedRun(
+        buildQueuedRunSummary({
+          ...queuedRun,
+          bucket: credentials.bucket,
+          objectKey: selectedKey,
+          fileType: selectedFile?.format,
+          selectedSheet: sheetName,
+        }),
+      );
+      await refreshRecentRuns(true);
     } catch (caughtError) {
+      if (caughtError instanceof ApiError && (caughtError.code === "task_queue_error" || caughtError.status === 503)) {
+        setFallbackNotice("Background queueing was unavailable, so the app processed this file inline instead.");
+        await runSynchronousProcess(appliedOverrideMap);
+        return;
+      }
+
       setError(caughtError instanceof Error ? caughtError.message : "Unable to queue background processing.");
     } finally {
-      setBusyState("idle");
+      if (busyState !== "processing") {
+        setBusyState("idle");
+      }
     }
   }
 
@@ -416,6 +552,24 @@ export default function App() {
       setRowsPerPage(preview.previewPage.pageSize);
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "Unable to load the requested preview page.");
+    } finally {
+      setBusyState("idle");
+    }
+  }
+
+  async function handleViewProcessRun(runId: number) {
+    setBusyState("loadingRun");
+    setError("");
+
+    try {
+      const run = await fetchRunStatus(runId);
+      const nextResult = buildProcessResponseFromRun(run);
+      if (!nextResult) {
+        throw new Error("The selected run is not a completed Pandas processing result.");
+      }
+      applyProcessResult(nextResult, nextResult.processingMetadata.appliedOverrides ?? {});
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "Unable to load the selected run result.");
     } finally {
       setBusyState("idle");
     }
@@ -590,9 +744,72 @@ export default function App() {
           </section>
 
           {error ? <div className="callout danger">{error}</div> : null}
+          {fallbackNotice ? <div className="callout warning">{fallbackNotice}</div> : null}
 
           <section className="workbench-stage">
             <section className="workbench-main">
+              {recentRuns.length > 0 ? (
+                <section className="card jobs-tray">
+                  <div className="card-header compact">
+                    <div>
+                      <p className="section-label">Recent jobs</p>
+                      <h2>Tracked processing</h2>
+                    </div>
+                  </div>
+
+                  {latestActiveRun ? (
+                    <LoadingNotice
+                      message={`${formatRunType(latestActiveRun.runType)} for ${latestActiveRun.objectKey} is ${latestActiveRun.progressStage || latestActiveRun.status}.`}
+                    />
+                  ) : null}
+
+                  <div className="job-list">
+                    {recentRuns.map((run) => {
+                      const isCurrentResult = result?.runId === run.runId;
+                      const canRetry = run.runType === "process" && run.status === "failed" && run.objectKey === selectedKey;
+                      const canViewResult = run.runType === "process" && run.status === "completed";
+
+                      return (
+                        <article key={run.runId} className={`job-card ${isCurrentResult ? "job-card-current" : ""}`}>
+                          <div className="job-card-header">
+                            <div>
+                              <p className="job-title">{run.objectKey}</p>
+                              <p className="job-meta">
+                                {formatRunType(run.runType)} · {run.engine} · {formatRunMoment(run)}
+                              </p>
+                            </div>
+                            <span className={`job-status job-status-${run.status}`}>{run.status}</span>
+                          </div>
+                          <div className="job-progress-row">
+                            <span>{run.progressStage || run.status}</span>
+                            <strong>{run.progressPercent}%</strong>
+                          </div>
+                          {run.errorMessage ? <p className="job-error">{run.errorMessage}</p> : null}
+                          <div className="job-actions">
+                            {canViewResult ? (
+                              <button
+                                className="secondary-button"
+                                onClick={() => {
+                                  void handleViewProcessRun(run.runId);
+                                }}
+                                disabled={busyState !== "idle" || isCurrentResult}
+                              >
+                                {isCurrentResult ? "Viewing result" : "View result"}
+                              </button>
+                            ) : null}
+                            {canRetry ? (
+                              <button className="secondary-button" onClick={handleProcessFile} disabled={busyState !== "idle"}>
+                                Retry
+                              </button>
+                            ) : null}
+                          </div>
+                        </article>
+                      );
+                    })}
+                  </div>
+                </section>
+              ) : null}
+
               <article className="card preview-card">
                 <div className="card-header compact">
                   <div>
@@ -608,7 +825,7 @@ export default function App() {
                         onChange={(event) => {
                           void handleRowsPerPageChange(Number(event.target.value));
                         }}
-                        disabled={busyState !== "idle" || runIsActive}
+                        disabled={busyState === "paging" || busyState === "loadingRun"}
                       >
                         {PAGE_SIZE_OPTIONS.map((option) => (
                           <option key={option} value={option}>
@@ -620,7 +837,7 @@ export default function App() {
                   ) : null}
                 </div>
 
-                {busyState === "paging" ? <LoadingNotice message={busyMessage} /> : null}
+                {busyState === "paging" || busyState === "loadingRun" ? <LoadingNotice message={busyMessage} /> : null}
 
                 {result ? (
                   <>
@@ -648,7 +865,7 @@ export default function App() {
                           onClick={() => {
                             void goToPreviousPage();
                           }}
-                          disabled={!result.previewPage.hasPreviousPage || busyState !== "idle" || runIsActive}
+                          disabled={!result.previewPage.hasPreviousPage || busyState === "paging" || busyState === "loadingRun"}
                         >
                           Previous
                         </button>
@@ -661,7 +878,7 @@ export default function App() {
                           onClick={() => {
                             void goToNextPage();
                           }}
-                          disabled={!result.previewPage.hasNextPage || busyState !== "idle" || runIsActive}
+                          disabled={!result.previewPage.hasNextPage || busyState === "paging" || busyState === "loadingRun"}
                         >
                           Next
                         </button>
@@ -812,7 +1029,11 @@ export default function App() {
                             onClick={handleProcessFile}
                             disabled={!selectedKey || busyState !== "idle" || runIsActive}
                           >
-                            {busyState === "processing" ? "Processing..." : "Standard processing (current)"}
+                            {busyState === "queueing"
+                              ? "Starting job..."
+                              : busyState === "processing"
+                                ? "Processing..."
+                                : "Process file"}
                           </button>
                         </div>
                       </div>
@@ -828,7 +1049,7 @@ export default function App() {
                         </div>
                       </div>
 
-                      {busyState === "listing" || busyState === "processing" || busyState === "queueing" || busyState === "spark" ? (
+                      {busyState === "listing" || busyState === "queueing" || busyState === "processing" || busyState === "spark" ? (
                         <LoadingNotice message={busyMessage} />
                       ) : null}
 
@@ -867,16 +1088,9 @@ export default function App() {
                       <section className="advanced-section">
                         <div>
                           <p className="section-label">Advanced processing</p>
-                          <h3>Background and comparison tools</h3>
+                          <h3>Comparison tools</h3>
                         </div>
                         <div className="advanced-actions">
-                          <button
-                            className="secondary-button"
-                            onClick={handleQueueBackgroundJob}
-                            disabled={!selectedKey || busyState !== "idle" || runIsActive}
-                          >
-                            Queue background job
-                          </button>
                           <button
                             className="secondary-button"
                             onClick={handleRunSparkComparison}
@@ -886,8 +1100,7 @@ export default function App() {
                           </button>
                         </div>
                         <p className="helper-text">
-                          Background jobs keep the current Pandas pipeline as the authoritative path. Spark comparison is
-                          experimental and CSV-only.
+                          Processing now prefers tracked background jobs automatically. Spark comparison remains experimental and CSV-only.
                         </p>
                       </section>
                     </article>
@@ -902,51 +1115,12 @@ export default function App() {
                           <button
                             className="secondary-button"
                             onClick={applySchemaDefaults}
-                            disabled={busyState !== "idle" || displayedSchema.length === 0 || runIsActive}
+                            disabled={busyState === "processing" || busyState === "queueing" || displayedSchema.length === 0}
                           >
                             Reset overrides
                           </button>
                         </div>
                       </div>
-
-                      {activeRun ? (
-                        <section className="run-status-panel">
-                          <div className="card-header compact">
-                            <div>
-                              <p className="section-label">Background job</p>
-                              <h3>Run status</h3>
-                            </div>
-                          </div>
-                          <div className="metrics-row">
-                            <div className="metric">
-                              <span className="metric-label">Status</span>
-                              <strong>{activeRun.status}</strong>
-                            </div>
-                            <div className="metric">
-                              <span className="metric-label">Engine</span>
-                              <strong>{activeRun.engine}</strong>
-                            </div>
-                            <div className="metric">
-                              <span className="metric-label">Stage</span>
-                              <strong>{activeRun.progressStage || "queued"}</strong>
-                            </div>
-                            <div className="metric">
-                              <span className="metric-label">Progress</span>
-                              <strong>{activeRun.progressPercent}%</strong>
-                            </div>
-                          </div>
-                          {runIsActive ? (
-                            <LoadingNotice
-                              message={`The job is ${activeRun.progressStage || activeRun.status}. The UI will refresh automatically when it completes.`}
-                            />
-                          ) : null}
-                          {activeRun.errorMessage ? (
-                            <div className="callout danger">
-                              <p>{activeRun.errorMessage}</p>
-                            </div>
-                          ) : null}
-                        </section>
-                      ) : null}
 
                       {result ? (
                         <>
@@ -995,7 +1169,7 @@ export default function App() {
                                             [column.column]: event.target.value,
                                           }))
                                         }
-                                        disabled={busyState !== "idle" || runIsActive}
+                                        disabled={busyState === "processing" || busyState === "queueing"}
                                       >
                                         {column.allowed_overrides.map((option) => (
                                           <option key={option} value={option}>

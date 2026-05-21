@@ -3,11 +3,24 @@ import type {
   PreviewPageResponse,
   ProcessAsyncResponse,
   ProcessResponse,
+  RunSummary,
   RunStatusResponse,
   S3CredentialsInput,
   S3File,
   SparkComparisonResponse,
 } from "./types";
+
+export class ApiError extends Error {
+  code?: string;
+  status: number;
+
+  constructor(message: string, status: number, code?: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+  }
+}
 
 async function apiFetch<T>(
   path: string,
@@ -42,25 +55,31 @@ async function apiFetch<T>(
     : {};
   if (!response.ok) {
     if (typeof body.detail === "string") {
-      throw new Error(body.detail);
+      throw new ApiError(body.detail, response.status, typeof body.code === "string" ? body.code : undefined);
     }
     if (body.code === "resource_limit_exceeded" || response.status === 413) {
-      throw new Error(
+      throw new ApiError(
         "The server could not finish processing this file within the deployment limits. Try again, reduce the preview page size, or redeploy with more conservative worker settings.",
+        response.status,
+        typeof body.code === "string" ? body.code : undefined,
       );
     }
     const loweredBody = rawBody.toLowerCase();
     if (loweredBody.includes("out of memory") || loweredBody.includes("sigkill")) {
-      throw new Error(
+      throw new ApiError(
         "The deployment appears to have run out of memory while processing this file. Redeploy with conservative worker settings and try again.",
+        response.status,
+        typeof body.code === "string" ? body.code : undefined,
       );
     }
     if (response.status >= 500) {
-      throw new Error(
+      throw new ApiError(
         "The deployment could not finish processing this file. The server may have restarted or hit a platform limit. Please try again and inspect the server logs if it keeps happening.",
+        response.status,
+        typeof body.code === "string" ? body.code : undefined,
       );
     }
-    throw new Error(rawBody || "Request failed.");
+    throw new ApiError(rawBody || "Request failed.", response.status, typeof body.code === "string" ? body.code : undefined);
   }
 
   return body as T;
@@ -131,6 +150,19 @@ export async function fetchPreviewPage(payload: {
 
 export async function fetchRunStatus(runId: number): Promise<RunStatusResponse> {
   return apiFetch<RunStatusResponse>(`/api/data/runs/${runId}`, undefined, { method: "GET" });
+}
+
+export async function fetchRecentRuns(params?: { objectKey?: string; limit?: number }): Promise<RunSummary[]> {
+  const query = new URLSearchParams();
+  if (params?.objectKey) {
+    query.set("object_key", params.objectKey);
+  }
+  if (typeof params?.limit === "number") {
+    query.set("limit", String(params.limit));
+  }
+  const suffix = query.size > 0 ? `?${query.toString()}` : "";
+  const response = await apiFetch<{ runs: RunSummary[] }>(`/api/data/runs${suffix}`, undefined, { method: "GET" });
+  return Array.isArray(response.runs) ? response.runs : [];
 }
 
 export async function runSparkComparison(payload: {

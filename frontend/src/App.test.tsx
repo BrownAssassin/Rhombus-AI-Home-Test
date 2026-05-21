@@ -15,14 +15,47 @@ function enterRequiredCredentials() {
   fireEvent.change(screen.getByLabelText(/^Bucket$/i), { target: { value: "demo-bucket" } });
 }
 
-function buildProcessResponse(overrides?: Partial<{
-  runId: number;
-  rowCount: number;
-  schema: Array<Record<string, unknown>>;
-  previewColumns: string[];
-  previewRows: Array<Record<string, unknown>>;
-  previewPage: Record<string, unknown>;
-}>) {
+function jsonResponse(body: unknown, init?: Partial<Response>): Partial<Response> {
+  return {
+    ok: init?.ok ?? true,
+    status: init?.status ?? 200,
+    text: async () => JSON.stringify(body),
+  };
+}
+
+function buildRecentRun(overrides?: Partial<Record<string, unknown>>) {
+  return {
+    runId: 1,
+    taskId: "task-123",
+    runType: "process",
+    sourceRunId: null,
+    status: "completed",
+    engine: "pandas",
+    bucket: "demo-bucket",
+    objectKey: "sample.csv",
+    progressStage: "completed",
+    progressPercent: 100,
+    errorMessage: "",
+    createdAt: "2026-05-21T00:00:00Z",
+    startedAt: "2026-05-21T00:00:01Z",
+    completedAt: "2026-05-21T00:00:02Z",
+    fileType: "csv",
+    selectedSheet: "",
+    ...overrides,
+  };
+}
+
+function buildProcessResponse(
+  overrides?: Partial<{
+    runId: number;
+    rowCount: number;
+    schema: Array<Record<string, unknown>>;
+    previewColumns: string[];
+    previewRows: Array<Record<string, unknown>>;
+    previewPage: Record<string, unknown>;
+    processingMetadata: Record<string, unknown>;
+  }>,
+) {
   const previewRows = overrides?.previewRows ?? [{ Score: 90 }, { Score: 75 }];
   const rowCount = overrides?.rowCount ?? previewRows.length;
   return {
@@ -53,7 +86,13 @@ function buildProcessResponse(overrides?: Partial<{
       hasNextPage: rowCount > 25,
     },
     warnings: [],
-    processingMetadata: { durationMs: 11.2, previewRowLimit: 100, chunkSize: 5000 },
+    processingMetadata: {
+      durationMs: 11.2,
+      previewRowLimit: 100,
+      chunkSize: 5000,
+      appliedOverrides: {},
+      ...overrides?.processingMetadata,
+    },
     selectedSheet: "",
     fileType: "csv",
   };
@@ -63,12 +102,14 @@ describe("App", () => {
   it("switches to the workbench after browsing files and preserves credentials when editing the connection", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue({
-        ok: true,
-        json: async () => ({
-          files: [{ key: "folder/sample.csv", size: 128, lastModified: "2026-04-03T00:00:00Z", format: "csv" }],
-        }),
-      }),
+      vi
+        .fn()
+        .mockResolvedValueOnce(
+          jsonResponse({
+            files: [{ key: "folder/sample.csv", size: 128, lastModified: "2026-04-03T00:00:00Z", format: "csv" }],
+          }),
+        )
+        .mockResolvedValueOnce(jsonResponse({ runs: [] })),
     );
 
     render(<App />);
@@ -87,74 +128,61 @@ describe("App", () => {
     expect(screen.getByDisplayValue("demo-bucket")).toBeInTheDocument();
   });
 
-  it("renders schema results and preview rows after processing in the workbench", async () => {
+  it("renders schema results and preview rows after falling back to synchronous processing", async () => {
     vi.stubGlobal(
       "fetch",
       vi
         .fn()
-        .mockResolvedValueOnce({
-          ok: true,
-          json: async () => ({
+        .mockResolvedValueOnce(
+          jsonResponse({
             files: [{ key: "sample.csv", size: 147, lastModified: "2026-04-03T00:00:00Z", format: "csv" }],
           }),
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          json: async () => buildProcessResponse(),
-        }),
+        )
+        .mockResolvedValueOnce(jsonResponse({ runs: [] }))
+        .mockResolvedValueOnce(jsonResponse({ detail: "Queue unavailable", code: "task_queue_error" }, { ok: false, status: 503 }))
+        .mockResolvedValueOnce(jsonResponse(buildProcessResponse()))
+        .mockResolvedValueOnce(jsonResponse({ runs: [buildRecentRun()] })),
     );
 
     render(<App />);
 
     enterRequiredCredentials();
     fireEvent.click(screen.getByRole("button", { name: /Browse files/i }));
-
     await waitFor(() => expect(screen.getByText("Processing workbench")).toBeInTheDocument());
 
-    fireEvent.click(screen.getByRole("button", { name: /Standard processing \(current\)/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Process file/i }));
 
     await waitFor(() => expect(screen.getByText("Inferred schema")).toBeInTheDocument());
     expect(screen.getByRole("cell", { name: "Score" })).toBeInTheDocument();
     expect(screen.getByLabelText(/Override type for Score/i)).toHaveValue("float");
     expect(screen.getByText("Processed preview")).toBeInTheDocument();
     expect(screen.getByText(/Preview rows 1-2 of 2/i)).toBeInTheDocument();
+    expect(screen.getByText(/Background queueing was unavailable/i)).toBeInTheDocument();
   });
 
   it("resets overrides back to the detected schema after reprocessing", async () => {
     const fetchMock = vi.fn();
     fetchMock
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
+      .mockResolvedValueOnce(
+        jsonResponse({
           files: [{ key: "sample.csv", size: 147, lastModified: "2026-04-03T00:00:00Z", format: "csv" }],
         }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => buildProcessResponse(),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () =>
+      )
+      .mockResolvedValueOnce(jsonResponse({ runs: [] }))
+      .mockResolvedValueOnce(jsonResponse({ detail: "Queue unavailable", code: "task_queue_error" }, { ok: false, status: 503 }))
+      .mockResolvedValueOnce(jsonResponse(buildProcessResponse()))
+      .mockResolvedValueOnce(jsonResponse({ runs: [buildRecentRun()] }))
+      .mockResolvedValueOnce(jsonResponse({ detail: "Queue unavailable", code: "task_queue_error" }, { ok: false, status: 503 }))
+      .mockResolvedValueOnce(
+        jsonResponse(
           buildProcessResponse({
             runId: 2,
-            schema: [
-              {
-                column: "Score",
-                inferred_type: "text",
-                storage_type: "string",
-                display_type: "Text",
-                nullable: true,
-                confidence: 0.97,
-                warnings: [],
-                null_token_count: 1,
-                sample_values: ["90", "75"],
-                allowed_overrides: ["text", "integer", "float", "boolean", "date", "datetime", "category", "complex"],
-              },
-            ],
             previewRows: [{ Score: "90" }, { Score: "75" }],
+            processingMetadata: { appliedOverrides: { Score: "text" } },
           }),
-      });
+        ),
+      )
+      .mockResolvedValueOnce(jsonResponse({ runs: [buildRecentRun({ runId: 2 }), buildRecentRun()] }));
 
     vi.stubGlobal("fetch", fetchMock);
 
@@ -165,7 +193,7 @@ describe("App", () => {
 
     await waitFor(() => expect(screen.getByText("Processing workbench")).toBeInTheDocument());
 
-    fireEvent.click(screen.getByRole("button", { name: /Standard processing \(current\)/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Process file/i }));
     await waitFor(() => expect(screen.getByLabelText(/Override type for Score/i)).toHaveValue("float"));
 
     fireEvent.change(screen.getByLabelText(/Override type for Score/i), { target: { value: "text" } });
@@ -224,7 +252,7 @@ describe("App", () => {
       },
     };
     const resizedFirstPageResponse = {
-      runId: 1,
+      runId: 2,
       rowCount: 30,
       previewColumns: ["Index"],
       previewRows: Array.from({ length: 30 }, (_, index) => ({ Index: index + 1 })),
@@ -240,42 +268,23 @@ describe("App", () => {
 
     const fetchMock = vi.fn();
     fetchMock
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
+      .mockResolvedValueOnce(
+        jsonResponse({
           files: [{ key: "sample.csv", size: 147, lastModified: "2026-04-03T00:00:00Z", format: "csv" }],
         }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => firstPageResponse,
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => secondPageResponse,
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => firstPageResponse,
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => secondPageResponse,
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => {
-          return { ...firstPageResponse, runId: 2 };
-        },
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ ...secondPageResponse, runId: 2 }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => resizedFirstPageResponse,
-      });
+      )
+      .mockResolvedValueOnce(jsonResponse({ runs: [] }))
+      .mockResolvedValueOnce(jsonResponse({ detail: "Queue unavailable", code: "task_queue_error" }, { ok: false, status: 503 }))
+      .mockResolvedValueOnce(jsonResponse(firstPageResponse))
+      .mockResolvedValueOnce(jsonResponse({ runs: [buildRecentRun()] }))
+      .mockResolvedValueOnce(jsonResponse(secondPageResponse))
+      .mockResolvedValueOnce(jsonResponse(firstPageResponse))
+      .mockResolvedValueOnce(jsonResponse(secondPageResponse))
+      .mockResolvedValueOnce(jsonResponse({ detail: "Queue unavailable", code: "task_queue_error" }, { ok: false, status: 503 }))
+      .mockResolvedValueOnce(jsonResponse({ ...firstPageResponse, runId: 2 }))
+      .mockResolvedValueOnce(jsonResponse({ runs: [buildRecentRun({ runId: 2 }), buildRecentRun()] }))
+      .mockResolvedValueOnce(jsonResponse({ ...secondPageResponse, runId: 2 }))
+      .mockResolvedValueOnce(jsonResponse(resizedFirstPageResponse));
 
     vi.stubGlobal("fetch", fetchMock);
 
@@ -285,7 +294,7 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: /Browse files/i }));
     await waitFor(() => expect(screen.getByText("Processing workbench")).toBeInTheDocument());
 
-    fireEvent.click(screen.getByRole("button", { name: /Standard processing \(current\)/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Process file/i }));
     await waitFor(() => expect(screen.getByText(/Preview rows 1-25 of 30/i)).toBeInTheDocument());
     expect(screen.getByRole("cell", { name: "1" })).toBeInTheDocument();
     expect(screen.queryByRole("cell", { name: "26" })).not.toBeInTheDocument();
@@ -293,7 +302,7 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: /Next page/i }));
     await waitFor(() => expect(screen.getByText(/Preview rows 26-30 of 30/i)).toBeInTheDocument());
     expect(screen.getByRole("cell", { name: "26" })).toBeInTheDocument();
-    expect(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body))).toMatchObject({
+    expect(JSON.parse(String(fetchMock.mock.calls[5]?.[1]?.body))).toMatchObject({
       run_id: 1,
       object_key: "sample.csv",
       file_type: "csv",
@@ -322,12 +331,11 @@ describe("App", () => {
   it("shows a stable empty state when browsing returns no supported files", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue({
-        ok: true,
-        json: async () => ({
+      vi.fn().mockResolvedValue(
+        jsonResponse({
           files: [],
         }),
-      }),
+      ),
     );
 
     render(<App />);
@@ -337,7 +345,7 @@ describe("App", () => {
 
     await waitFor(() => expect(screen.getByText("Processing workbench")).toBeInTheDocument());
     expect(screen.getByText(/No supported files were found for this bucket or prefix/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Standard processing \(current\)/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Process file/i })).toBeDisabled();
   });
 
   it("allows the files and schema drawer to be collapsed without losing the preview", async () => {
@@ -345,16 +353,15 @@ describe("App", () => {
       "fetch",
       vi
         .fn()
-        .mockResolvedValueOnce({
-          ok: true,
-          json: async () => ({
+        .mockResolvedValueOnce(
+          jsonResponse({
             files: [{ key: "sample.csv", size: 147, lastModified: "2026-04-03T00:00:00Z", format: "csv" }],
           }),
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          json: async () => buildProcessResponse(),
-        }),
+        )
+        .mockResolvedValueOnce(jsonResponse({ runs: [] }))
+        .mockResolvedValueOnce(jsonResponse({ detail: "Queue unavailable", code: "task_queue_error" }, { ok: false, status: 503 }))
+        .mockResolvedValueOnce(jsonResponse(buildProcessResponse()))
+        .mockResolvedValueOnce(jsonResponse({ runs: [buildRecentRun()] })),
     );
 
     render(<App />);
@@ -363,7 +370,7 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: /Browse files/i }));
     await waitFor(() => expect(screen.getByText("Processing workbench")).toBeInTheDocument());
 
-    fireEvent.click(screen.getByRole("button", { name: /Standard processing \(current\)/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Process file/i }));
     await waitFor(() => expect(screen.getByText(/Preview rows 1-2 of 2/i)).toBeInTheDocument());
 
     fireEvent.click(screen.getByRole("button", { name: /Hide files & schema/i }));
@@ -374,37 +381,51 @@ describe("App", () => {
     expect(screen.getByText("Supported files")).toBeInTheDocument();
   });
 
-  it("queues a background job, polls run status, and hydrates the preview on completion", async () => {
+  it("prefers async processing, shows recent jobs, and hydrates the preview on completion", async () => {
     const processResponse = buildProcessResponse({ runId: 7 });
     const completedRun = {
       ...processResponse,
       taskId: "task-123",
+      runType: "process",
+      sourceRunId: null,
       status: "completed",
       engine: "pandas",
+      bucket: "demo-bucket",
+      objectKey: "sample.csv",
       progressStage: "completed",
       progressPercent: 100,
       errorMessage: "",
+      createdAt: "2026-05-21T00:00:00Z",
+      startedAt: "2026-05-21T00:00:01Z",
+      completedAt: "2026-05-21T00:00:02Z",
     };
 
     vi.stubGlobal(
       "fetch",
       vi
         .fn()
-        .mockResolvedValueOnce({
-          ok: true,
-          text: async () =>
-            JSON.stringify({
-              files: [{ key: "sample.csv", size: 147, lastModified: "2026-04-03T00:00:00Z", format: "csv" }],
-            }),
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          text: async () => JSON.stringify({ runId: 7, taskId: "task-123", status: "queued", engine: "pandas" }),
-        })
-        .mockResolvedValue({
-          ok: true,
-          text: async () => JSON.stringify(completedRun),
-        }),
+        .mockResolvedValueOnce(
+          jsonResponse({
+            files: [{ key: "sample.csv", size: 147, lastModified: "2026-04-03T00:00:00Z", format: "csv" }],
+          }),
+        )
+        .mockResolvedValueOnce(jsonResponse({ runs: [] }))
+        .mockResolvedValueOnce(jsonResponse({ runId: 7, taskId: "task-123", runType: "process", status: "queued", engine: "pandas" }))
+        .mockResolvedValueOnce(
+          jsonResponse({
+            runs: [
+              buildRecentRun({
+                runId: 7,
+                taskId: "task-123",
+                status: "queued",
+                progressStage: "queued",
+                progressPercent: 0,
+              }),
+            ],
+          }),
+        )
+        .mockResolvedValueOnce(jsonResponse({ runs: [buildRecentRun({ runId: 7 })] }))
+        .mockResolvedValueOnce(jsonResponse(completedRun)),
     );
 
     render(<App />);
@@ -413,9 +434,9 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: /Browse files/i }));
     await waitFor(() => expect(screen.getByText("Processing workbench")).toBeInTheDocument());
 
-    fireEvent.click(screen.getByRole("button", { name: /Queue background job/i }));
-    await waitFor(() => expect(screen.getByText("Run status")).toBeInTheDocument());
-    expect(screen.getAllByText("queued").length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("button", { name: /Process file/i }));
+    await waitFor(() => expect(screen.getByText("Tracked processing")).toBeInTheDocument());
+    expect(screen.getAllByText("sample.csv").length).toBeGreaterThan(0);
 
     await waitFor(() => expect(screen.getByText(/Preview rows 1-2 of 2/i)).toBeInTheDocument());
     expect(screen.getByRole("cell", { name: "Score" })).toBeInTheDocument();
@@ -424,45 +445,40 @@ describe("App", () => {
   it("runs the experimental Spark comparison for CSV files and disables it for Excel", async () => {
     const fetchMock = vi.fn();
     fetchMock
-      .mockResolvedValueOnce({
-        ok: true,
-        text: async () =>
-          JSON.stringify({
-            files: [{ key: "sample.csv", size: 147, lastModified: "2026-04-03T00:00:00Z", format: "csv" }],
-          }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        text: async () =>
-          JSON.stringify({
-            engine: "spark",
-            fileType: "csv",
-            objectKey: "sample.csv",
-            rowCount: 2,
-            sparkSchema: [
-              { column: "Score", sparkType: "int", mappedType: "integer", displayType: "Integer", nullable: false },
-            ],
-            previewColumns: ["Score"],
-            previewRows: [{ Score: "90" }, { Score: "75" }],
-            previewPage: {
-              page: 1,
-              pageSize: 25,
-              totalRows: 2,
-              totalPages: 1,
-              hasPreviousPage: false,
-              hasNextPage: false,
-            },
-            processingMetadata: { durationMs: 32.1, pageSize: 25, sparkMaster: "local[*]" },
-            notes: ["Experimental comparison mode."],
-          }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        text: async () =>
-          JSON.stringify({
-            files: [{ key: "workbook.xlsx", size: 512, lastModified: "2026-04-03T00:00:00Z", format: "excel" }],
-          }),
-      });
+      .mockResolvedValueOnce(
+        jsonResponse({
+          files: [{ key: "sample.csv", size: 147, lastModified: "2026-04-03T00:00:00Z", format: "csv" }],
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ runs: [] }))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          engine: "spark",
+          fileType: "csv",
+          objectKey: "sample.csv",
+          rowCount: 2,
+          sparkSchema: [
+            { column: "Score", sparkType: "int", mappedType: "integer", displayType: "Integer", nullable: false },
+          ],
+          previewColumns: ["Score"],
+          previewRows: [{ Score: "90" }, { Score: "75" }],
+          previewPage: {
+            page: 1,
+            pageSize: 25,
+            totalRows: 2,
+            totalPages: 1,
+            hasPreviousPage: false,
+            hasNextPage: false,
+          },
+          processingMetadata: { durationMs: 32.1, pageSize: 25, sparkMaster: "local[*]" },
+          notes: ["Experimental comparison mode."],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          files: [{ key: "workbook.xlsx", size: 512, lastModified: "2026-04-03T00:00:00Z", format: "excel" }],
+        }),
+      );
 
     vi.stubGlobal("fetch", fetchMock);
 

@@ -677,6 +677,7 @@ def process_s3_object(
             "durationMs": duration_ms,
             "previewRowLimit": preview_row_limit,
             "chunkSize": CSV_CHUNK_SIZE if file_type == "csv" else None,
+            "appliedOverrides": overrides or {},
         }
         if progress_callback is not None:
             progress_callback("completed", 100)
@@ -778,6 +779,7 @@ def process_local_file(
             "durationMs": duration_ms,
             "previewRowLimit": preview_row_limit,
             "chunkSize": CSV_CHUNK_SIZE if file_type == "csv" else None,
+            "appliedOverrides": overrides or {},
         }
         return result
     except MemoryError as exc:

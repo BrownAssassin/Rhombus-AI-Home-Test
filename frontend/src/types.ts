@@ -46,6 +46,7 @@ export type ProcessResponse = {
     durationMs: number;
     previewRowLimit: number;
     chunkSize: number | null;
+    appliedOverrides?: Record<string, string>;
   };
   selectedSheet: string;
   fileType: "csv" | "excel";
@@ -54,8 +55,29 @@ export type ProcessResponse = {
 export type ProcessAsyncResponse = {
   runId: number;
   taskId: string;
+  runType: "process" | "spark_compare";
+  sourceRunId?: number | null;
   status: "queued" | "processing" | "completed" | "failed";
   engine: "pandas" | "spark";
+};
+
+export type RunSummary = {
+  runId: number;
+  taskId: string;
+  runType: "process" | "spark_compare";
+  sourceRunId?: number | null;
+  status: "queued" | "processing" | "completed" | "failed";
+  engine: "pandas" | "spark";
+  bucket: string;
+  objectKey: string;
+  progressStage: string;
+  progressPercent: number;
+  errorMessage: string;
+  createdAt: string;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  fileType?: "csv" | "excel";
+  selectedSheet?: string;
 };
 
 export type PreviewPageResponse = {
@@ -73,14 +95,7 @@ export type PreviewPageResponse = {
   };
 };
 
-export type RunStatusResponse = {
-  runId: number;
-  taskId: string;
-  status: "queued" | "processing" | "completed" | "failed";
-  engine: "pandas" | "spark";
-  progressStage: string;
-  progressPercent: number;
-  errorMessage: string;
+export type RunStatusResponse = RunSummary & {
   rowCount?: number;
   schema?: ColumnInferenceResult[];
   previewColumns?: string[];
@@ -98,9 +113,11 @@ export type RunStatusResponse = {
     durationMs: number;
     previewRowLimit?: number;
     chunkSize?: number | null;
+    appliedOverrides?: Record<string, string>;
   };
   selectedSheet?: string;
   fileType?: "csv" | "excel";
+  sparkComparison?: SparkComparisonResponse;
 };
 
 export type SparkComparisonResponse = {
