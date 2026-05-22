@@ -22,6 +22,8 @@ import type {
 
 type ViewState = "connection" | "workbench";
 type BusyState = "idle" | "listing" | "processing" | "queueing" | "paging" | "spark" | "loadingRun";
+type MobilePanel = "rail" | "inspector" | null;
+type InspectorMode = "schema" | "spark";
 
 const PAGE_SIZE_OPTIONS = [25, 50, 100] as const;
 const RECENT_RUN_LIMIT = 6;
@@ -74,6 +76,28 @@ function formatRunMoment(run: RunSummary): string {
     return "Just now";
   }
   return new Date(timestamp).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+function formatFileFormat(file: S3File | null): string {
+  if (!file) {
+    return "No file selected";
+  }
+  return file.format === "excel" ? "Excel workbook" : "CSV dataset";
+}
+
+function formatFileTimestamp(timestamp: string | null): string {
+  if (!timestamp) {
+    return "Unknown update time";
+  }
+  return new Date(timestamp).toLocaleDateString([], {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
+function formatJobMeta(run: RunSummary): string {
+  return `${formatRunType(run.runType)} | ${run.engine} | ${formatRunMoment(run)}`;
 }
 
 function formatColumnWarnings(schema: ColumnInferenceResult[]): JSX.Element | null {
@@ -191,7 +215,8 @@ function buildEffectiveOverrides(
 
 export default function App() {
   const [view, setView] = useState<ViewState>("connection");
-  const [isWorkbenchSidebarOpen, setIsWorkbenchSidebarOpen] = useState(false);
+  const [activeMobilePanel, setActiveMobilePanel] = useState<MobilePanel>(null);
+  const [inspectorMode, setInspectorMode] = useState<InspectorMode>("schema");
   const [credentials, setCredentials] = useState<S3CredentialsInput>(defaultCredentials);
   const [files, setFiles] = useState<S3File[]>([]);
   const [selectedKey, setSelectedKey] = useState("");
@@ -212,6 +237,8 @@ export default function App() {
 
   const selectedFile = files.find((item) => item.key === selectedKey) ?? null;
   const displayedSchema = detectedSchema.length > 0 ? detectedSchema : result?.schema ?? [];
+  const currentProcessRun = result ? recentRuns.find((run) => run.runId === result.runId) ?? null : null;
+  const currentSparkRun = selectedSparkRunId ? recentRuns.find((run) => run.runId === selectedSparkRunId) ?? null : null;
   const previewRows = result?.previewRows ?? [];
   const activePage = result?.previewPage.page ?? currentPage;
   const activePageSize = result?.previewPage.pageSize ?? rowsPerPage;
@@ -230,8 +257,19 @@ export default function App() {
   const changedOverrideCount = displayedSchema.filter(
     (column) => (overrides[column.column] ?? column.inferred_type) !== column.inferred_type,
   ).length;
+  const hasUnsavedOverrides = changedOverrideCount > 0;
   const runIsActive = recentRuns.some(isRunActive);
   const latestActiveRun = recentRuns.find(isRunActive) ?? null;
+  const activeFileRun = latestActiveRun?.objectKey === selectedKey ? latestActiveRun : null;
+  const showingPreviewForSelectedFile = Boolean(result) && (!currentProcessRun || currentProcessRun.objectKey === selectedKey);
+  const showProcessWorkspacePrompt = Boolean(selectedFile) && !result && !activeFileRun;
+  const canCompareWithSpark = result?.fileType === "csv";
+  const selectedFileSummary = selectedFile
+    ? `${formatFileFormat(selectedFile)} | ${formatBytes(selectedFile.size)} | Updated ${formatFileTimestamp(selectedFile.lastModified)}`
+    : "Choose a file from the left rail to start processing.";
+  const activeRunStatusSummary = activeFileRun
+    ? `${formatRunType(activeFileRun.runType)} for ${activeFileRun.objectKey} is ${activeFileRun.progressStage || activeFileRun.status}.`
+    : "";
   const busyMessage = {
     idle: "",
     listing: "Loading supported files from S3...",
@@ -339,7 +377,7 @@ export default function App() {
         window.clearTimeout(timeoutId);
       }
     };
-  }, [pendingProcessRunId, pendingSparkRunId, result?.runId, runIsActive, selectedKey, view]);
+  }, [pendingProcessRunId, pendingSparkRunId, runIsActive, selectedKey, view]);
 
   function applyProcessResult(nextResult: ProcessResponse, appliedOverrides: Record<string, string>) {
     setResult(nextResult);
@@ -350,6 +388,7 @@ export default function App() {
       ...schemaToOverrides(nextResult.schema),
       ...appliedOverrides,
     });
+    setInspectorMode("schema");
     setSelectedSparkRunId(null);
     setSparkComparison(null);
   }
@@ -364,6 +403,7 @@ export default function App() {
     setPendingSparkRunId(null);
     setSelectedSparkRunId(null);
     setSparkComparison(null);
+    setInspectorMode("schema");
     setFallbackNotice("");
   }
 
@@ -402,7 +442,6 @@ export default function App() {
         setSelectedKey("");
         setSheetName("");
       }
-      setIsWorkbenchSidebarOpen(true);
       setView("workbench");
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "Unable to load files.");
@@ -450,6 +489,7 @@ export default function App() {
       applyProcessResult(sourceResult, sourceResult.processingMetadata.appliedOverrides ?? {});
     }
 
+    setInspectorMode("spark");
     setSelectedSparkRunId(comparisonRun.runId);
     setSparkComparison(comparisonRun.sparkComparison);
     return comparisonRun.sparkComparison;
@@ -490,8 +530,10 @@ export default function App() {
     setBusyState("queueing");
     setError("");
     setFallbackNotice("");
+    setActiveMobilePanel(null);
     setSelectedSparkRunId(null);
     setSparkComparison(null);
+    setInspectorMode("schema");
 
     const { rows: effectiveOverrides, appliedOverrideMap } = buildEffectiveOverrides(displayedSchema, overrides);
 
@@ -524,9 +566,7 @@ export default function App() {
 
       setError(caughtError instanceof Error ? caughtError.message : "Unable to queue background processing.");
     } finally {
-      if (busyState !== "processing") {
-        setBusyState("idle");
-      }
+      setBusyState("idle");
     }
   }
 
@@ -544,6 +584,7 @@ export default function App() {
     setError("");
     setSelectedSparkRunId(null);
     setSparkComparison(null);
+    setInspectorMode("spark");
 
     try {
       const queuedRun = await runSparkComparison({
@@ -619,6 +660,7 @@ export default function App() {
     try {
       const nextResult = await loadCompletedProcessRun(runId);
       applyProcessResult(nextResult, nextResult.processingMetadata.appliedOverrides ?? {});
+      setActiveMobilePanel(null);
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "Unable to load the selected run result.");
     } finally {
@@ -632,6 +674,7 @@ export default function App() {
 
     try {
       await loadSparkComparisonRun(runId, sourceRunId);
+      setActiveMobilePanel("inspector");
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "Unable to load the selected Spark comparison.");
     } finally {
@@ -646,6 +689,7 @@ export default function App() {
   function handleSelectFile(file: S3File) {
     setSelectedKey(file.key);
     resetWorkbenchState();
+    setActiveMobilePanel(null);
     if (file.format !== "excel") {
       setSheetName("");
     }
@@ -655,7 +699,7 @@ export default function App() {
   }
 
   function handleEditConnection() {
-    setIsWorkbenchSidebarOpen(false);
+    setActiveMobilePanel(null);
     setView("connection");
     if (error) {
       setError("");
@@ -795,10 +839,14 @@ export default function App() {
               <div className="workbench-summary">
                 <span>{files.length} supported files</span>
                 <span>{selectedFile?.key ?? "No file selected"}</span>
+                {activeFileRun ? <span className="summary-chip-live">Processing in background</span> : null}
               </div>
               <div className="workbench-header-buttons">
-                <button className="secondary-button" onClick={() => setIsWorkbenchSidebarOpen((open) => !open)}>
-                  {isWorkbenchSidebarOpen ? "Hide files & schema" : "Open files & schema"}
+                <button className="secondary-button mobile-panel-button" onClick={() => setActiveMobilePanel("rail")}>
+                  Files & jobs
+                </button>
+                <button className="secondary-button mobile-panel-button" onClick={() => setActiveMobilePanel("inspector")}>
+                  Schema & tools
                 </button>
                 <button className="secondary-button" onClick={handleEditConnection}>
                   Edit connection
@@ -808,26 +856,135 @@ export default function App() {
           </section>
 
           {error ? <div className="callout danger">{error}</div> : null}
-          {fallbackNotice ? <div className="callout warning">{fallbackNotice}</div> : null}
 
-          <section className="workbench-stage">
-            <section className="workbench-main">
-              {recentRuns.length > 0 ? (
-                <section className="card jobs-tray">
-                  <div className="card-header compact">
-                    <div>
-                      <p className="section-label">Recent jobs</p>
-                      <h2>Tracked processing</h2>
-                    </div>
+          <section className="workbench-grid">
+            {activeMobilePanel ? (
+              <button
+                className="workbench-panel-backdrop"
+                aria-label="Close workbench side panel"
+                onClick={() => setActiveMobilePanel(null)}
+              />
+            ) : null}
+
+            <aside
+              className={`card workbench-panel workbench-rail ${
+                activeMobilePanel === "rail" ? "workbench-panel-open" : ""
+              }`}
+              aria-label="Files and jobs"
+            >
+              <div className="panel-header">
+                <div>
+                  <p className="section-label">File selection + jobs</p>
+                  <h2>Choose a file</h2>
+                </div>
+                <button className="secondary-button panel-close-button" onClick={() => setActiveMobilePanel(null)}>
+                  Close panel
+                </button>
+              </div>
+
+              <section className="rail-section">
+                <div className="rail-section-header">
+                  <div>
+                    <p className="section-label">Available files</p>
+                    <h3>Supported objects</h3>
                   </div>
+                  <span className="section-stat">{files.length}</span>
+                </div>
+                {files.length === 0 ? (
+                  <div className="empty-state compact">
+                    <p>No supported files were found for this bucket or prefix.</p>
+                  </div>
+                ) : (
+                  <div className="file-list">
+                    {files.map((file) => (
+                      <button
+                        key={file.key}
+                        className={`file-item ${file.key === selectedKey ? "selected" : ""}`}
+                        onClick={() => handleSelectFile(file)}
+                      >
+                        <span>{file.key}</span>
+                        <span>
+                          {file.format.toUpperCase()} | {formatBytes(file.size)}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </section>
 
-                  {latestActiveRun ? (
-                    <LoadingNotice
-                      message={`${formatRunType(latestActiveRun.runType)} for ${latestActiveRun.objectKey} is ${latestActiveRun.progressStage || latestActiveRun.status}.`}
+              <section className="rail-section selected-file-panel">
+                <div className="rail-section-header">
+                  <div>
+                    <p className="section-label">Selected file</p>
+                    <h3>{selectedFile?.key ?? "No file selected"}</h3>
+                  </div>
+                </div>
+                <p className="helper-text">{selectedFileSummary}</p>
+
+                {selectedFile?.format === "excel" ? (
+                  <label>
+                    Optional sheet name
+                    <input
+                      value={sheetName}
+                      onChange={(event) => setSheetName(event.target.value)}
+                      placeholder="First sheet if blank"
                     />
-                  ) : null}
+                  </label>
+                ) : null}
+              </section>
 
-                  <div className="job-list">
+              <section className="rail-section process-panel">
+                <div className="rail-section-header">
+                  <div>
+                    <p className="section-label">Primary action</p>
+                    <h3>Process this file</h3>
+                  </div>
+                </div>
+                <button
+                  className="primary-button"
+                  onClick={handleProcessFile}
+                  disabled={!selectedKey || busyState !== "idle" || runIsActive}
+                >
+                  {busyState === "queueing"
+                    ? "Starting job..."
+                    : busyState === "processing"
+                      ? "Processing..."
+                      : "Process file"}
+                </button>
+                <p className="helper-text">Infer schema and build the first preview page for the selected dataset.</p>
+                {fallbackNotice ? <p className="inline-notice">{fallbackNotice}</p> : null}
+                {busyState === "listing" || busyState === "queueing" || busyState === "processing" ? (
+                  <LoadingNotice message={busyMessage} />
+                ) : null}
+              </section>
+
+              {activeFileRun ? (
+                <section className="rail-section active-job-panel">
+                  <div className="rail-section-header">
+                    <div>
+                      <p className="section-label">Active job</p>
+                      <h3>{activeFileRun.objectKey}</h3>
+                    </div>
+                    <span className={`job-status job-status-${activeFileRun.status}`}>{activeFileRun.status}</span>
+                  </div>
+                  <p className="job-meta">{formatJobMeta(activeFileRun)}</p>
+                  <div className="job-progress-row">
+                    <span>{activeFileRun.progressStage || activeFileRun.status}</span>
+                    <strong>{activeFileRun.progressPercent}%</strong>
+                  </div>
+                  <LoadingNotice message={activeRunStatusSummary} />
+                </section>
+              ) : null}
+
+              <section className="rail-section jobs-section">
+                <div className="rail-section-header">
+                  <div>
+                    <p className="section-label">Tracked jobs</p>
+                    <h3>Recent runs</h3>
+                  </div>
+                </div>
+                {recentRuns.length > 0 ? (
+                  <div className="job-list compact">
                     {recentRuns.map((run) => {
                       const isCurrentResult = result?.runId === run.runId;
                       const isCurrentComparison = selectedSparkRunId === run.runId;
@@ -843,9 +1000,7 @@ export default function App() {
                           <div className="job-card-header">
                             <div>
                               <p className="job-title">{run.objectKey}</p>
-                              <p className="job-meta">
-                                {formatRunType(run.runType)} · {run.engine} · {formatRunMoment(run)}
-                              </p>
+                              <p className="job-meta">{formatJobMeta(run)}</p>
                             </div>
                             <span className={`job-status job-status-${run.status}`}>{run.status}</span>
                           </div>
@@ -887,39 +1042,94 @@ export default function App() {
                       );
                     })}
                   </div>
-                </section>
-              ) : null}
-
-              <article className="card preview-card">
-                <div className="card-header compact">
-                  <div>
-                    <p className="section-label">Step 4</p>
-                    <h2>Processed preview</h2>
+                ) : (
+                  <div className="empty-state compact">
+                    <p>Process the selected file to build the first preview and start a visible run history.</p>
                   </div>
-                  {result ? (
-                    <label className="pagination-select">
-                      Rows per page
-                      <select
-                        aria-label="Rows per page"
-                        value={rowsPerPage}
-                        onChange={(event) => {
-                          void handleRowsPerPageChange(Number(event.target.value));
-                        }}
-                        disabled={busyState === "paging" || busyState === "loadingRun"}
-                      >
-                        {PAGE_SIZE_OPTIONS.map((option) => (
-                          <option key={option} value={option}>
-                            {option}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  ) : null}
+                )}
+              </section>
+            </aside>
+
+            <section className="workbench-center">
+              <article className="card preview-card" aria-label="Results workspace">
+                <div className="card-header compact workspace-header">
+                  <div>
+                    <p className="section-label">Results workspace</p>
+                    <h2>Processed preview</h2>
+                    <p className="helper-text">
+                      {selectedFile
+                        ? `Working with ${selectedFile.key}. Results and pagination stay here once processing completes.`
+                        : "Choose a supported file from the left rail to start building a preview."}
+                    </p>
+                  </div>
+                  <div className="workspace-header-actions">
+                    {activeFileRun ? <span className="status-chip status-chip-live">Processing in background</span> : null}
+                    {result ? (
+                      <label className="pagination-select">
+                        Rows per page
+                        <select
+                          aria-label="Rows per page"
+                          value={rowsPerPage}
+                          onChange={(event) => {
+                            void handleRowsPerPageChange(Number(event.target.value));
+                          }}
+                          disabled={busyState === "paging" || busyState === "loadingRun"}
+                        >
+                          {PAGE_SIZE_OPTIONS.map((option) => (
+                            <option key={option} value={option}>
+                              {option}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
+                  </div>
                 </div>
 
                 {busyState === "paging" || busyState === "loadingRun" ? <LoadingNotice message={busyMessage} /> : null}
 
-                {result ? (
+                {activeFileRun ? (
+                  <section className="workspace-status">
+                    <div className="workspace-status-header">
+                      <strong>Processing {activeFileRun.objectKey}</strong>
+                      <span>
+                        {activeFileRun.progressStage || activeFileRun.status} | {activeFileRun.progressPercent}%
+                      </span>
+                    </div>
+                    <p>
+                      {showingPreviewForSelectedFile
+                        ? "Your last completed preview stays visible while the new run finishes."
+                        : "The first preview and schema will appear here automatically when the run completes."}
+                    </p>
+                  </section>
+                ) : null}
+
+                {!selectedFile ? (
+                  <div className="empty-state workspace-empty-state">
+                    <h3>Choose a file to begin</h3>
+                    <p>
+                      Select a supported CSV or Excel file from the left rail. The schema inspector and preview will
+                      update automatically after processing.
+                    </p>
+                  </div>
+                ) : showProcessWorkspacePrompt ? (
+                  <div className="empty-state workspace-empty-state ready-state">
+                    <p className="section-label">Ready to process</p>
+                    <h3>{selectedFile.key}</h3>
+                    <p>{selectedFileSummary}</p>
+                    <button
+                      className="primary-button"
+                      onClick={handleProcessFile}
+                      disabled={busyState !== "idle" || runIsActive}
+                    >
+                      Process file
+                    </button>
+                    <p className="helper-text">
+                      Run the selected file to infer its schema, build the first preview page, and unlock override
+                      controls.
+                    </p>
+                  </div>
+                ) : result ? (
                   <>
                     {result.warnings.length > 0 ? (
                       <div className="callout warning">
@@ -987,54 +1197,103 @@ export default function App() {
                     </div>
                   </>
                 ) : (
-                  <div className="empty-state">
-                    <p>
-                      {files.length === 0
-                        ? "Browse a different bucket or prefix to load supported files into the workbench."
-                        : "Select a file and process it to preview converted rows here."}
-                    </p>
+                  <div className="empty-state workspace-empty-state">
+                    <h3>Waiting for results</h3>
+                    <p>Process the selected file to load its preview here and reveal the schema tools in the inspector.</p>
                   </div>
                 )}
+              </article>
+            </section>
 
-                {sparkComparison && result ? (
-                  <section className="comparison-panel">
-                    <div className="card-header compact">
-                      <div>
-                        <p className="section-label">Experimental</p>
-                        <h2>Compare with Spark</h2>
-                        <p className="helper-text">
-                          This comparison uses the same CSV source as the selected Pandas run. Pandas remains the
-                          authoritative inference pipeline for the app.
-                        </p>
-                      </div>
+            <aside
+              className={`card workbench-panel workbench-inspector ${
+                activeMobilePanel === "inspector" ? "workbench-panel-open" : ""
+              }`}
+              aria-label="Schema and comparison tools"
+            >
+              <div className="panel-header">
+                <div>
+                  <p className="section-label">Schema + comparison</p>
+                  <h2>Review and refine</h2>
+                </div>
+                <button className="secondary-button panel-close-button" onClick={() => setActiveMobilePanel(null)}>
+                  Close panel
+                </button>
+              </div>
+
+              {!selectedFile ? (
+                <div className="empty-state inspector-empty-state">
+                  <h3>Select a file first</h3>
+                  <p>Choose a file from the left rail to unlock schema review and optional Spark comparison tools.</p>
+                </div>
+              ) : !result ? (
+                <div className="empty-state inspector-empty-state">
+                  <h3>Schema tools appear after processing</h3>
+                  <p>Run processing to infer schema, review warnings, and enable override controls for {selectedFile.key}.</p>
+                </div>
+              ) : (
+                <>
+                  <div className="inspector-header">
+                    <div className="inspector-tabs" role="tablist" aria-label="Inspector modes">
+                      <button
+                        className={`inspector-tab ${inspectorMode === "schema" ? "active" : ""}`}
+                        onClick={() => setInspectorMode("schema")}
+                        type="button"
+                      >
+                        Schema
+                      </button>
+                      {sparkComparison ? (
+                        <button
+                          className={`inspector-tab ${inspectorMode === "spark" ? "active" : ""}`}
+                          onClick={() => setInspectorMode("spark")}
+                          type="button"
+                        >
+                          Spark comparison
+                        </button>
+                      ) : null}
                     </div>
-                    <div className="metrics-row">
-                      <div className="metric">
-                        <span className="metric-label">Pandas runtime</span>
-                        <strong>{result.processingMetadata.durationMs} ms</strong>
+                    {hasUnsavedOverrides ? <span className="status-chip status-chip-warning">Overrides changed</span> : null}
+                  </div>
+
+                  {inspectorMode === "spark" && sparkComparison ? (
+                    <section className="comparison-panel">
+                      <div className="card-header compact">
+                        <div>
+                          <p className="section-label">Experimental</p>
+                          <h2>Compare with Spark</h2>
+                          <p className="helper-text">
+                            This comparison uses the same CSV source as the selected Pandas run. Pandas remains the
+                            authoritative inference pipeline for the app.
+                          </p>
+                        </div>
                       </div>
-                      <div className="metric">
-                        <span className="metric-label">Spark runtime</span>
-                        <strong>{sparkComparison.processingMetadata.durationMs} ms</strong>
+                      <div className="metrics-row">
+                        <div className="metric">
+                          <span className="metric-label">Pandas runtime</span>
+                          <strong>{result.processingMetadata.durationMs} ms</strong>
+                        </div>
+                        <div className="metric">
+                          <span className="metric-label">Spark runtime</span>
+                          <strong>{sparkComparison.processingMetadata.durationMs} ms</strong>
+                        </div>
+                        <div className="metric">
+                          <span className="metric-label">Pandas rows</span>
+                          <strong>{result.rowCount.toLocaleString()}</strong>
+                        </div>
+                        <div className="metric">
+                          <span className="metric-label">Spark rows</span>
+                          <strong>{sparkComparison.rowCount.toLocaleString()}</strong>
+                        </div>
                       </div>
-                      <div className="metric">
-                        <span className="metric-label">Pandas rows</span>
-                        <strong>{result.rowCount.toLocaleString()}</strong>
+                      {currentSparkRun ? <p className="helper-text">Viewing {formatJobMeta(currentSparkRun)}.</p> : null}
+                      <div className="callout warning">
+                        <h3>Comparison note</h3>
+                        <ul>
+                          {sparkComparison.notes.map((note) => (
+                            <li key={note}>{note}</li>
+                          ))}
+                        </ul>
                       </div>
-                      <div className="metric">
-                        <span className="metric-label">Spark rows</span>
-                        <strong>{sparkComparison.rowCount.toLocaleString()}</strong>
-                      </div>
-                    </div>
-                    <div className="callout warning">
-                      <h3>Comparison note</h3>
-                      <ul>
-                        {sparkComparison.notes.map((note) => (
-                          <li key={note}>{note}</li>
-                        ))}
-                      </ul>
-                    </div>
-                    <div className="comparison-grid">
                       <div className="table-wrap comparison-table-wrap">
                         <table>
                           <thead>
@@ -1062,16 +1321,13 @@ export default function App() {
                           <div>
                             <h3>Spark preview</h3>
                             <p>
-                              Rows{" "}
-                              {(sparkComparison.previewPage.page - 1) * sparkComparison.previewPage.pageSize + 1}-
+                              Rows {(sparkComparison.previewPage.page - 1) * sparkComparison.previewPage.pageSize + 1}-
                               {(sparkComparison.previewPage.page - 1) * sparkComparison.previewPage.pageSize +
                                 sparkComparison.previewRows.length}{" "}
                               of {sparkComparison.previewPage.totalRows}
                             </p>
                           </div>
-                          <span className="comparison-badge">
-                            {sparkComparison.processingMetadata.sparkMaster}
-                          </span>
+                          <span className="comparison-badge">{sparkComparison.processingMetadata.sparkMaster}</span>
                         </div>
                         <table>
                           <thead>
@@ -1092,106 +1348,90 @@ export default function App() {
                           </tbody>
                         </table>
                       </div>
-                    </div>
-                  </section>
-                ) : null}
-              </article>
-            </section>
-
-            {isWorkbenchSidebarOpen ? (
-              <>
-                <button
-                  className="workbench-drawer-backdrop"
-                  aria-label="Close files and schema panel"
-                  onClick={() => setIsWorkbenchSidebarOpen(false)}
-                />
-                <aside className="workbench-drawer" aria-label="Files and schema panel">
-                  <div className="drawer-header">
-                    <div>
-                      <p className="eyebrow">Workbench controls</p>
-                      <h2>Files and schema</h2>
-                    </div>
-                    <button
-                      className="secondary-button drawer-close-button"
-                      onClick={() => setIsWorkbenchSidebarOpen(false)}
-                    >
-                      Close panel
-                    </button>
-                  </div>
-
-                  <div className="drawer-grid">
-                    <article className="card drawer-card">
-                      <div className="card-header stacked">
-                        <div>
-                          <p className="section-label">Step 2</p>
-                          <h2>Supported files</h2>
+                    </section>
+                  ) : (
+                    <>
+                      <section className="schema-overview">
+                        <div className="metrics-row">
+                          <div className="metric">
+                            <span className="metric-label">Rows profiled</span>
+                            <strong>{result.rowCount.toLocaleString()}</strong>
+                          </div>
+                          <div className="metric">
+                            <span className="metric-label">Processed in</span>
+                            <strong>{result.processingMetadata.durationMs} ms</strong>
+                          </div>
+                          <div className="metric">
+                            <span className="metric-label">Run ID</span>
+                            <strong>{result.runId}</strong>
+                          </div>
+                          <div className="metric">
+                            <span className="metric-label">Changed overrides</span>
+                            <strong>{changedOverrideCount}</strong>
+                          </div>
                         </div>
-                        <div className="card-actions">
-                          <button
-                            className="primary-button"
-                            onClick={handleProcessFile}
-                            disabled={!selectedKey || busyState !== "idle" || runIsActive}
-                          >
-                            {busyState === "queueing"
-                              ? "Starting job..."
-                              : busyState === "processing"
-                                ? "Processing..."
-                                : "Process file"}
-                          </button>
-                        </div>
+                      </section>
+
+                      <div className="inspector-toolbar">
+                        <button
+                          className="secondary-button"
+                          onClick={applySchemaDefaults}
+                          disabled={busyState === "processing" || busyState === "queueing" || displayedSchema.length === 0}
+                        >
+                          Reset overrides
+                        </button>
+                        <button className="secondary-button" onClick={handleProcessFile} disabled={busyState !== "idle" || runIsActive}>
+                          Reprocess with overrides
+                        </button>
                       </div>
 
-                      <div className="metrics-row">
-                        <div className="metric">
-                          <span className="metric-label">Supported objects</span>
-                          <strong>{files.length}</strong>
-                        </div>
-                        <div className="metric">
-                          <span className="metric-label">Selected file</span>
-                          <strong>{selectedFile?.key ?? "None"}</strong>
-                        </div>
+                      <div className="table-wrap schema-table-wrap">
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>Column</th>
+                              <th>Detected</th>
+                              <th>Override</th>
+                              <th>Confidence</th>
+                              <th>Samples</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {displayedSchema.map((column) => (
+                              <tr key={column.column}>
+                                <td>{column.column}</td>
+                                <td>{column.display_type}</td>
+                                <td>
+                                  <select
+                                    aria-label={`Override type for ${column.column}`}
+                                    value={overrides[column.column] ?? column.inferred_type}
+                                    onChange={(event) =>
+                                      setOverrides((current) => ({
+                                        ...current,
+                                        [column.column]: event.target.value,
+                                      }))
+                                    }
+                                    disabled={busyState === "processing" || busyState === "queueing"}
+                                  >
+                                    {column.allowed_overrides.map((option) => (
+                                      <option key={option} value={option}>
+                                        {typeLabelOverrides[option] ?? option}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </td>
+                                <td>{Math.round(column.confidence * 100)}%</td>
+                                <td>{column.sample_values.join(", ") || "No non-null sample"}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
                       </div>
 
-                      {busyState === "listing" || busyState === "queueing" || busyState === "processing" || busyState === "spark" ? (
-                        <LoadingNotice message={busyMessage} />
-                      ) : null}
-
-                      {files.length === 0 ? (
-                        <div className="empty-state">
-                          <p>No supported files were found for this bucket or prefix.</p>
-                        </div>
-                      ) : (
-                        <div className="file-list">
-                          {files.map((file) => (
-                            <button
-                              key={file.key}
-                              className={`file-item ${file.key === selectedKey ? "selected" : ""}`}
-                              onClick={() => handleSelectFile(file)}
-                            >
-                              <span>{file.key}</span>
-                              <span>
-                                {file.format.toUpperCase()} - {formatBytes(file.size)}
-                              </span>
-                            </button>
-                          ))}
-                        </div>
-                      )}
-
-                      {selectedFile?.format === "excel" ? (
-                        <label>
-                          Optional sheet name
-                          <input
-                            value={sheetName}
-                            onChange={(event) => setSheetName(event.target.value)}
-                            placeholder="First sheet if blank"
-                          />
-                        </label>
-                      ) : null}
-
-                      {result?.fileType === "csv" ? (
+                      {canCompareWithSpark ? (
                         <section className="advanced-section">
                           <div>
-                            <p className="section-label">Advanced processing</p>
+                            <p className="section-label">Experimental</p>
                             <h3>Compare engines</h3>
                           </div>
                           <div className="advanced-actions">
@@ -1204,110 +1444,16 @@ export default function App() {
                             </button>
                           </div>
                           <p className="helper-text">
-                            Run Spark against this completed CSV result to compare row counts, runtime, and Spark-native
+                            Compare this completed CSV run with Spark to inspect runtime, row counts, and Spark-native
                             schema mapping without replacing the current Pandas workflow.
                           </p>
                         </section>
                       ) : null}
-                    </article>
-
-                    <article className="card drawer-card schema-card">
-                      <div className="card-header stacked compact">
-                        <div>
-                          <p className="section-label">Step 3</p>
-                          <h2>Inferred schema</h2>
-                        </div>
-                        <div className="card-actions">
-                          <button
-                            className="secondary-button"
-                            onClick={applySchemaDefaults}
-                            disabled={busyState === "processing" || busyState === "queueing" || displayedSchema.length === 0}
-                          >
-                            Reset overrides
-                          </button>
-                        </div>
-                      </div>
-
-                      {result ? (
-                        <>
-                          <div className="metrics-row">
-                            <div className="metric">
-                              <span className="metric-label">Rows profiled</span>
-                              <strong>{result.rowCount.toLocaleString()}</strong>
-                            </div>
-                            <div className="metric">
-                              <span className="metric-label">Processed in</span>
-                              <strong>{result.processingMetadata.durationMs} ms</strong>
-                            </div>
-                            <div className="metric">
-                              <span className="metric-label">Run ID</span>
-                              <strong>{result.runId}</strong>
-                            </div>
-                            <div className="metric">
-                              <span className="metric-label">Changed overrides</span>
-                              <strong>{changedOverrideCount}</strong>
-                            </div>
-                          </div>
-
-                          <div className="table-wrap schema-table-wrap">
-                            <table>
-                              <thead>
-                                <tr>
-                                  <th>Column</th>
-                                  <th>Detected</th>
-                                  <th>Override</th>
-                                  <th>Confidence</th>
-                                  <th>Samples</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {displayedSchema.map((column) => (
-                                  <tr key={column.column}>
-                                    <td>{column.column}</td>
-                                    <td>{column.display_type}</td>
-                                    <td>
-                                      <select
-                                        aria-label={`Override type for ${column.column}`}
-                                        value={overrides[column.column] ?? column.inferred_type}
-                                        onChange={(event) =>
-                                          setOverrides((current) => ({
-                                            ...current,
-                                            [column.column]: event.target.value,
-                                          }))
-                                        }
-                                        disabled={busyState === "processing" || busyState === "queueing"}
-                                      >
-                                        {column.allowed_overrides.map((option) => (
-                                          <option key={option} value={option}>
-                                            {typeLabelOverrides[option] ?? option}
-                                          </option>
-                                        ))}
-                                      </select>
-                                    </td>
-                                    <td>{Math.round(column.confidence * 100)}%</td>
-                                    <td>{column.sample_values.join(", ") || "No non-null sample"}</td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-
-                          <div className="toolbar">
-                            <button className="secondary-button" onClick={handleProcessFile} disabled={busyState !== "idle" || runIsActive}>
-                              Reprocess with overrides
-                            </button>
-                          </div>
-                        </>
-                      ) : (
-                        <div className="empty-state">
-                          <p>Process the selected file to infer its schema and manage column overrides.</p>
-                        </div>
-                      )}
-                    </article>
-                  </div>
-                </aside>
-              </>
-            ) : null}
+                    </>
+                  )}
+                </>
+              )}
+            </aside>
           </section>
         </>
       )}

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App";
@@ -13,6 +13,18 @@ function enterRequiredCredentials() {
   fireEvent.change(screen.getByLabelText(/Access key ID/i), { target: { value: "AKIA123" } });
   fireEvent.change(screen.getByLabelText(/Secret access key/i), { target: { value: "secret" } });
   fireEvent.change(screen.getByLabelText(/^Bucket$/i), { target: { value: "demo-bucket" } });
+}
+
+function getFilesAndJobsPanel() {
+  return screen.getByRole("complementary", { name: /Files and jobs/i });
+}
+
+function getInspectorPanel() {
+  return screen.getByRole("complementary", { name: /Schema and comparison tools/i });
+}
+
+function getResultsWorkspace() {
+  return screen.getByLabelText(/Results workspace/i);
 }
 
 function jsonResponse(body: unknown, init?: Partial<Response>): Partial<Response> {
@@ -150,9 +162,10 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: /Browse files/i }));
     await waitFor(() => expect(screen.getByText("Processing workbench")).toBeInTheDocument());
 
-    fireEvent.click(screen.getByRole("button", { name: /Process file/i }));
+    expect(within(getResultsWorkspace()).getByText("Ready to process")).toBeInTheDocument();
+    fireEvent.click(within(getResultsWorkspace()).getByRole("button", { name: /Process file/i }));
 
-    await waitFor(() => expect(screen.getByText("Inferred schema")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("Review and refine")).toBeInTheDocument());
     expect(screen.getByRole("cell", { name: "Score" })).toBeInTheDocument();
     expect(screen.getByLabelText(/Override type for Score/i)).toHaveValue("float");
     expect(screen.getByText("Processed preview")).toBeInTheDocument();
@@ -193,7 +206,7 @@ describe("App", () => {
 
     await waitFor(() => expect(screen.getByText("Processing workbench")).toBeInTheDocument());
 
-    fireEvent.click(screen.getByRole("button", { name: /Process file/i }));
+    fireEvent.click(within(getFilesAndJobsPanel()).getByRole("button", { name: /Process file/i }));
     await waitFor(() => expect(screen.getByLabelText(/Override type for Score/i)).toHaveValue("float"));
 
     fireEvent.change(screen.getByLabelText(/Override type for Score/i), { target: { value: "text" } });
@@ -294,7 +307,7 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: /Browse files/i }));
     await waitFor(() => expect(screen.getByText("Processing workbench")).toBeInTheDocument());
 
-    fireEvent.click(screen.getByRole("button", { name: /Process file/i }));
+    fireEvent.click(within(getFilesAndJobsPanel()).getByRole("button", { name: /Process file/i }));
     await waitFor(() => expect(screen.getByText(/Preview rows 1-25 of 30/i)).toBeInTheDocument());
     expect(screen.getByRole("cell", { name: "1" })).toBeInTheDocument();
     expect(screen.queryByRole("cell", { name: "26" })).not.toBeInTheDocument();
@@ -345,10 +358,10 @@ describe("App", () => {
 
     await waitFor(() => expect(screen.getByText("Processing workbench")).toBeInTheDocument());
     expect(screen.getByText(/No supported files were found for this bucket or prefix/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Process file/i })).toBeDisabled();
+    expect(within(getFilesAndJobsPanel()).getByRole("button", { name: /Process file/i })).toBeDisabled();
   });
 
-  it("allows the files and schema drawer to be collapsed without losing the preview", async () => {
+  it("shows a clear ready state in the workspace and guidance in the inspector before processing", async () => {
     vi.stubGlobal(
       "fetch",
       vi
@@ -370,15 +383,9 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: /Browse files/i }));
     await waitFor(() => expect(screen.getByText("Processing workbench")).toBeInTheDocument());
 
-    fireEvent.click(screen.getByRole("button", { name: /Process file/i }));
-    await waitFor(() => expect(screen.getByText(/Preview rows 1-2 of 2/i)).toBeInTheDocument());
-
-    fireEvent.click(screen.getByRole("button", { name: /Hide files & schema/i }));
-    expect(screen.queryByText("Supported files")).not.toBeInTheDocument();
-    expect(screen.getByText("Processed preview")).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: /Open files & schema/i }));
-    expect(screen.getByText("Supported files")).toBeInTheDocument();
+    expect(within(getResultsWorkspace()).getByText("Ready to process")).toBeInTheDocument();
+    expect(within(getResultsWorkspace()).getByRole("button", { name: /Process file/i })).toBeInTheDocument();
+    expect(within(getInspectorPanel()).getByText(/Schema tools appear after processing/i)).toBeInTheDocument();
   });
 
   it("prefers async processing, shows recent jobs, and hydrates the preview on completion", async () => {
@@ -434,8 +441,8 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: /Browse files/i }));
     await waitFor(() => expect(screen.getByText("Processing workbench")).toBeInTheDocument());
 
-    fireEvent.click(screen.getByRole("button", { name: /Process file/i }));
-    await waitFor(() => expect(screen.getByText("Tracked processing")).toBeInTheDocument());
+    fireEvent.click(within(getFilesAndJobsPanel()).getByRole("button", { name: /Process file/i }));
+    await waitFor(() => expect(within(getFilesAndJobsPanel()).getByText("Recent runs")).toBeInTheDocument());
     expect(screen.getAllByText("sample.csv").length).toBeGreaterThan(0);
 
     await waitFor(() => expect(screen.getByText(/Preview rows 1-2 of 2/i)).toBeInTheDocument());
@@ -558,15 +565,15 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: /Browse files/i }));
     await waitFor(() => expect(screen.getByText("Processing workbench")).toBeInTheDocument());
 
-    fireEvent.click(screen.getByRole("button", { name: /Process file/i }));
+    fireEvent.click(within(getFilesAndJobsPanel()).getByRole("button", { name: /Process file/i }));
     await waitFor(() => expect(screen.getByText(/Preview rows 1-2 of 2/i)).toBeInTheDocument());
 
-    fireEvent.click(screen.getByRole("button", { name: /Compare with Spark \(experimental\)/i }));
+    fireEvent.click(within(getInspectorPanel()).getByRole("button", { name: /Compare with Spark \(experimental\)/i }));
     await waitFor(() => expect(screen.getByText("Compare with Spark")).toBeInTheDocument());
     expect(screen.getByText("Experimental comparison mode.")).toBeInTheDocument();
     expect(screen.getByText("Spark preview")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /workbook\.xlsx/i }));
-    expect(screen.queryByRole("button", { name: /Compare with Spark \(experimental\)/i })).not.toBeInTheDocument();
+    expect(within(getInspectorPanel()).queryByRole("button", { name: /Compare with Spark \(experimental\)/i })).not.toBeInTheDocument();
   });
 });
