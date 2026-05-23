@@ -1,14 +1,39 @@
-import type { ColumnInferenceResult, PreviewPageResponse, ProcessResponse, S3CredentialsInput, S3File } from "./types";
+import type {
+  ColumnInferenceResult,
+  PreviewPageResponse,
+  ProcessAsyncResponse,
+  ProcessResponse,
+  RunSummary,
+  RunStatusResponse,
+  S3CredentialsInput,
+  S3File,
+} from "./types";
 
-async function apiFetch<T>(path: string, payload: Record<string, unknown>): Promise<T> {
+export class ApiError extends Error {
+  code?: string;
+  status: number;
+
+  constructor(message: string, status: number, code?: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+async function apiFetch<T>(
+  path: string,
+  payload?: Record<string, unknown>,
+  options?: { method?: "GET" | "POST" },
+): Promise<T> {
   let response: Response;
   try {
     response = await fetch(path, {
-      method: "POST",
+      method: options?.method ?? "POST",
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(payload),
+      body: payload ? JSON.stringify(payload) : undefined,
     });
   } catch {
     throw new Error("The server could not be reached while processing this file. Please try again.");
@@ -29,25 +54,31 @@ async function apiFetch<T>(path: string, payload: Record<string, unknown>): Prom
     : {};
   if (!response.ok) {
     if (typeof body.detail === "string") {
-      throw new Error(body.detail);
+      throw new ApiError(body.detail, response.status, typeof body.code === "string" ? body.code : undefined);
     }
     if (body.code === "resource_limit_exceeded" || response.status === 413) {
-      throw new Error(
+      throw new ApiError(
         "The server could not finish processing this file within the deployment limits. Try again, reduce the preview page size, or redeploy with more conservative worker settings.",
+        response.status,
+        typeof body.code === "string" ? body.code : undefined,
       );
     }
     const loweredBody = rawBody.toLowerCase();
     if (loweredBody.includes("out of memory") || loweredBody.includes("sigkill")) {
-      throw new Error(
+      throw new ApiError(
         "The deployment appears to have run out of memory while processing this file. Redeploy with conservative worker settings and try again.",
+        response.status,
+        typeof body.code === "string" ? body.code : undefined,
       );
     }
     if (response.status >= 500) {
-      throw new Error(
+      throw new ApiError(
         "The deployment could not finish processing this file. The server may have restarted or hit a platform limit. Please try again and inspect the server logs if it keeps happening.",
+        response.status,
+        typeof body.code === "string" ? body.code : undefined,
       );
     }
-    throw new Error(rawBody || "Request failed.");
+    throw new ApiError(rawBody || "Request failed.", response.status, typeof body.code === "string" ? body.code : undefined);
   }
 
   return body as T;
@@ -66,6 +97,22 @@ export async function processFile(payload: {
   previewRowLimit?: number;
 }): Promise<ProcessResponse> {
   return apiFetch<ProcessResponse>("/api/data/process", {
+    ...payload.credentials,
+    object_key: payload.objectKey,
+    sheet_name: payload.sheetName ?? "",
+    overrides: payload.overrides ?? [],
+    preview_row_limit: payload.previewRowLimit ?? 100,
+  });
+}
+
+export async function processFileAsync(payload: {
+  credentials: S3CredentialsInput;
+  objectKey: string;
+  sheetName?: string;
+  overrides?: Array<{ column: string; target_type: string }>;
+  previewRowLimit?: number;
+}): Promise<ProcessAsyncResponse> {
+  return apiFetch<ProcessAsyncResponse>("/api/data/process-async", {
     ...payload.credentials,
     object_key: payload.objectKey,
     sheet_name: payload.sheetName ?? "",
@@ -97,5 +144,36 @@ export async function fetchPreviewPage(payload: {
     preview_columns: payload.previewColumns,
     page: payload.page,
     page_size: payload.pageSize,
+  });
+}
+
+export async function fetchRunStatus(runId: number): Promise<RunStatusResponse> {
+  return apiFetch<RunStatusResponse>(`/api/data/runs/${runId}`, undefined, { method: "GET" });
+}
+
+export async function fetchRecentRuns(params?: { objectKey?: string; limit?: number }): Promise<RunSummary[]> {
+  const query = new URLSearchParams();
+  if (params?.objectKey) {
+    query.set("object_key", params.objectKey);
+  }
+  if (typeof params?.limit === "number") {
+    query.set("limit", String(params.limit));
+  }
+  const suffix = query.size > 0 ? `?${query.toString()}` : "";
+  const response = await apiFetch<{ runs: RunSummary[] }>(`/api/data/runs${suffix}`, undefined, { method: "GET" });
+  return Array.isArray(response.runs) ? response.runs : [];
+}
+
+export async function runSparkComparison(payload: {
+  credentials: S3CredentialsInput;
+  sourceRunId: number;
+  page?: number;
+  pageSize?: number;
+}): Promise<ProcessAsyncResponse> {
+  return apiFetch<ProcessAsyncResponse>("/api/data/spark-compare", {
+    ...payload.credentials,
+    source_run_id: payload.sourceRunId,
+    page: payload.page ?? 1,
+    page_size: payload.pageSize ?? 25,
   });
 }

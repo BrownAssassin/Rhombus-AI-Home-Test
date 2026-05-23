@@ -7,17 +7,21 @@ COPY frontend/ ./
 RUN npm run build
 
 
-FROM python:3.12-slim AS runtime
+FROM python:3.12-slim-bookworm AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     DJANGO_DEBUG=False \
     PORT=8000 \
-    PYTHONPATH=/app/backend
+    PYTHONPATH=/app/backend \
+    JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
 
 WORKDIR /app
 
 COPY requirements.txt ./
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y openjdk-17-jre-headless \
+    && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY manage.py ./
