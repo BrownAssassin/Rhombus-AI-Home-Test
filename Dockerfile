@@ -7,26 +7,38 @@ COPY frontend/ ./
 RUN npm run build
 
 
-FROM python:3.12-slim-bookworm AS runtime
+FROM python:3.12-slim-bookworm AS python-base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     DJANGO_DEBUG=False \
     PORT=8000 \
-    PYTHONPATH=/app/backend \
-    JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+    PYTHONPATH=/app/backend
 
 WORKDIR /app
 
-COPY requirements.txt ./
+FROM python-base AS worker-runtime
+
+ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+
+COPY requirements.base.txt requirements.worker.txt ./
 RUN apt-get update \
     && apt-get install --no-install-recommends -y openjdk-17-jre-headless \
     && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.worker.txt
 
 COPY manage.py ./
 COPY backend ./backend
-COPY infer_data_types.py ./
+CMD ["celery", "-A", "rhombus_home_test", "worker", "--loglevel=info", "--concurrency=2"]
+
+
+FROM python-base AS web-runtime
+
+COPY requirements.base.txt requirements.web.txt ./
+RUN pip install --no-cache-dir -r requirements.web.txt
+
+COPY manage.py ./
+COPY backend ./backend
 COPY docker/start.py ./docker/start.py
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 

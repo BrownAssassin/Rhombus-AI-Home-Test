@@ -50,7 +50,7 @@ Public deployment: `https://rhombus-ai-home-test.onrender.com/`
 - `docs/brief/`: assignment brief and supporting project notes
 - `examples/`: sample datasets for local smoke testing
 - `infer_data_types.py`: local CLI wrapper around the shared processing service
-- `Dockerfile`: production-oriented single-container deployment
+- `Dockerfile`: production-oriented Docker build with a lean web default target plus a Spark-capable worker target
 - `docker-compose.yml`: local async development stack for Django, Celery, and Redis
 
 ## Requirements
@@ -62,7 +62,7 @@ Public deployment: `https://rhombus-ai-home-test.onrender.com/`
 - Java 17 or newer for the experimental local PySpark comparison path
 - Redis for the optional local async-processing stack, unless you use Docker Compose
 
-The current dependency set also installs and runs on Python 3.14, but keeping local development on Python 3.12 reduces drift from the containerized runtime. If you only want the stable synchronous flow, Redis and Java are optional. They are needed only for the experimental async and Spark comparison features in this branch.
+The current dependency set also installs and runs on Python 3.14, but keeping local development on Python 3.12 reduces drift from the containerized runtime. If you only want the stable synchronous flow, Redis and Java are optional. They are needed only for the experimental async and Spark comparison features in this branch. The Docker build now keeps Java and PySpark on the worker-only target so the public web image can stay leaner for Render deploys.
 
 ## Local setup
 
@@ -128,10 +128,10 @@ docker compose up --build
 That starts:
 
 - `web`: Django + the built frontend
-- `worker`: Celery background worker
+- `worker`: Celery background worker with the Java + PySpark runtime needed for experimental Spark comparisons
 - `redis`: broker/result backend for queued jobs
 
-The Compose setup mounts a shared SQLite volume for both `web` and `worker` so background tasks can read and update the same `ProcessingRun` rows that the web container creates.
+The Compose setup mounts a shared SQLite volume for both `web` and `worker` so background tasks can read and update the same `ProcessingRun` rows that the web container creates. That volume is pinned explicitly as `rhombus-ai-home-test_app_data` to keep the local Docker state easier to recognize.
 
 ### Split development mode
 
@@ -413,7 +413,7 @@ docker compose up --build
 
 Render is the recommended public host for this project because it matches the app's single-container architecture and gives you one public URL for both the Django API and the React frontend.
 
-This branch keeps the current synchronous Pandas flow as the stable deployment default. The new Redis/Celery and PySpark additions are intended to be validated locally or in a separate enhancement/demo environment first rather than forcing them into the existing submission deployment immediately.
+This branch keeps the current synchronous Pandas flow as the stable deployment default. The new Redis/Celery and PySpark additions are intended to be validated locally or in a separate enhancement/demo environment first rather than forcing them into the existing submission deployment immediately. The repository `Dockerfile` now defaults to the lean web target that Render should deploy, while the heavier Spark-capable worker target is reserved for local Compose or future multi-service environments.
 
 ### Create the service
 
