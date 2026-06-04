@@ -458,7 +458,6 @@ describe("App", () => {
             runs: [],
           }),
         )
-        .mockResolvedValueOnce(jsonResponse({ runs: [buildRecentRun({ runId: 7 })] }))
         .mockResolvedValueOnce(jsonResponse(completedRun)),
     );
 
@@ -551,41 +550,12 @@ describe("App", () => {
       )
       .mockResolvedValueOnce(
         jsonResponse({
-          runs: [
-            buildRecentRun({
-              runId: 9,
-              taskId: "spark-task-123",
-              runType: "spark_compare",
-              sourceRunId: 3,
-              status: "queued",
-              engine: "spark",
-              progressStage: "queued",
-              progressPercent: 0,
-            }),
-            buildRecentRun({ runId: 3 }),
-          ],
+          runs: [buildRecentRun({ runId: 3 })],
         }),
       )
-      .mockResolvedValueOnce(
-        jsonResponse({
-          runs: [
-            { ...buildRecentRun({ runId: 3 }) },
-            {
-              ...buildRecentRun({
-                runId: 9,
-                taskId: "spark-task-123",
-                runType: "spark_compare",
-                sourceRunId: 3,
-                status: "completed",
-                engine: "spark",
-                progressStage: "completed",
-                progressPercent: 100,
-              }),
-            },
-          ],
-        }),
-      )
-      .mockResolvedValueOnce(jsonResponse(sparkComparisonRun));
+      .mockResolvedValueOnce(jsonResponse(sparkComparisonRun))
+      .mockResolvedValueOnce(jsonResponse(sparkComparisonRun))
+      .mockResolvedValueOnce(jsonResponse({ runs: [] }));
 
     vi.stubGlobal("fetch", fetchMock);
 
@@ -609,4 +579,43 @@ describe("App", () => {
     openInspectorPanel();
     expect(within(getInspectorPanel()).queryByRole("button", { name: /Compare with Spark \(experimental\)/i })).not.toBeInTheDocument();
   }, 10000);
+
+  it("keeps the current preview visible while browsing other files before processing them", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(
+          jsonResponse({
+            files: [
+              { key: "sample.csv", size: 147, lastModified: "2026-04-03T00:00:00Z", format: "csv" },
+              { key: "other.csv", size: 256, lastModified: "2026-04-04T00:00:00Z", format: "csv" },
+            ],
+          }),
+        )
+        .mockResolvedValueOnce(jsonResponse({ runs: [] }))
+        .mockResolvedValueOnce(jsonResponse({ detail: "Queue unavailable", code: "task_queue_error" }, { ok: false, status: 503 }))
+        .mockResolvedValueOnce(jsonResponse(buildProcessResponse()))
+        .mockResolvedValueOnce(jsonResponse({ runs: [buildRecentRun()] }))
+        .mockResolvedValueOnce(jsonResponse({ runs: [] })),
+    );
+
+    render(<App />);
+
+    enterRequiredCredentials();
+    fireEvent.click(screen.getByRole("button", { name: /Browse files/i }));
+    await waitFor(() => expect(screen.getByText("Processing workbench")).toBeInTheDocument());
+
+    fireEvent.click(within(getFilesAndJobsPanel()).getByRole("button", { name: /Process file/i }));
+    await waitFor(() => expect(screen.getByText(/Preview rows 1-2 of 2/i)).toBeInTheDocument());
+
+    openFilesAndJobsPanel();
+    fireEvent.click(within(getFilesAndJobsPanel()).getByRole("button", { name: /other\.csv/i }));
+    fireEvent.click(within(getFilesAndJobsPanel()).getByRole("button", { name: /Close panel/i }));
+
+    expect(screen.getByText(/Viewing sample\.csv while browsing other\.csv/i)).toBeInTheDocument();
+    expect(screen.getByText(/Preview rows 1-2 of 2/i)).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Score" })).toBeInTheDocument();
+    expect(screen.queryByText("Ready to process")).not.toBeInTheDocument();
+  });
 });
