@@ -10,6 +10,7 @@ from django.test import SimpleTestCase
 import data_processing.services.processing as processing_service
 from data_processing.services.processing import (
     CSV_CHUNK_SIZE,
+    InvalidPreviewPageError,
     S3Credentials,
     clear_staged_file_cache,
     fetch_s3_preview_page,
@@ -17,6 +18,7 @@ from data_processing.services.processing import (
     process_local_file,
     process_s3_object,
 )
+from data_processing.services.processing.preview import build_preview_page_metadata
 
 
 class FakePaginator:
@@ -107,7 +109,7 @@ class ProcessingServiceTests(SimpleTestCase):
             ]
         )
 
-        with patch("data_processing.services.processing.build_s3_client", return_value=fake_client):
+        with patch("data_processing.services.processing.s3.build_s3_client", return_value=fake_client):
             files = list_supported_files(self.credentials)
 
         self.assertEqual([item["key"] for item in files], ["incoming/a-first.csv", "incoming/z-last.xlsx"])
@@ -127,7 +129,7 @@ class ProcessingServiceTests(SimpleTestCase):
             }
         )
 
-        with patch("data_processing.services.processing.build_s3_client", return_value=fake_client):
+        with patch("data_processing.services.processing.pipeline.build_s3_client", return_value=fake_client):
             result = process_s3_object(self.credentials, "incoming/sample.csv", preview_row_limit=1)
 
         schema = {item["column"]: item for item in result["schema"]}
@@ -217,7 +219,7 @@ class ProcessingServiceTests(SimpleTestCase):
             },
         ]
 
-        with patch("data_processing.services.processing.build_s3_client", return_value=fake_client):
+        with patch("data_processing.services.processing.pipeline.build_s3_client", return_value=fake_client):
             preview = fetch_s3_preview_page(
                 credentials=self.credentials,
                 object_key="incoming/sample.csv",
@@ -249,7 +251,7 @@ class ProcessingServiceTests(SimpleTestCase):
             }
         )
 
-        with patch("data_processing.services.processing.build_s3_client", return_value=fake_client):
+        with patch("data_processing.services.processing.pipeline.build_s3_client", return_value=fake_client):
             result = process_s3_object(self.credentials, "incoming/sample.csv", preview_row_limit=2)
             preview = fetch_s3_preview_page(
                 credentials=self.credentials,
@@ -282,7 +284,7 @@ class ProcessingServiceTests(SimpleTestCase):
         )
 
         with (
-            patch("data_processing.services.processing.build_s3_client", return_value=fake_client),
+            patch("data_processing.services.processing.pipeline.build_s3_client", return_value=fake_client),
             patch.object(processing_service.STAGED_FILE_CACHE, "max_items", 0),
         ):
             result = process_s3_object(self.credentials, "incoming/sample.csv", preview_row_limit=2)
@@ -300,3 +302,9 @@ class ProcessingServiceTests(SimpleTestCase):
 
         self.assertEqual(fake_client.download_calls, 2)
         self.assertEqual(preview["previewRows"], [{"Name": "Charlie", "Score": 80}, {"Name": "David", "Score": 75}])
+
+    def test_preview_page_metadata_rejects_out_of_range_pages(self) -> None:
+        """Raise the stable preview-page error when callers exceed row bounds."""
+
+        with self.assertRaises(InvalidPreviewPageError):
+            build_preview_page_metadata(4, page=3, page_size=2)

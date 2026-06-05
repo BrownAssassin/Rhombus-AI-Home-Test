@@ -53,6 +53,15 @@ Public deployment: `https://rhombus-ai-home-test.onrender.com/`
 - `Dockerfile`: production-oriented Docker build with a lean web default target plus a Spark-capable worker target
 - `docker-compose.yml`: local async development stack for Django, Celery, and Redis
 
+## Backend architecture
+
+The backend now separates concerns more explicitly so the data-processing workflow is easier to follow and extend:
+
+- API layer: DRF views validate serializers, call application-layer functions, and map stable errors to HTTP responses.
+- Application layer: `backend/data_processing/application/` owns orchestration for file browsing, sync processing, async queueing, run lookups, and preview paging.
+- Service layer: `backend/data_processing/services/processing/` and `backend/data_processing/services/inference/` contain the mechanics for S3 access, staged-file reuse, schema inference, conversion, and preview generation.
+- Task layer: Celery tasks are thin infrastructure wrappers that delegate to application-layer background-run functions instead of mixing orchestration and persistence directly.
+
 ## Requirements
 
 - Python 3.12 recommended for local work to match the Docker runtime

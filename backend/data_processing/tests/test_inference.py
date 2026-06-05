@@ -4,6 +4,7 @@ from django.test import SimpleTestCase
 import pandas as pd
 
 from data_processing.services.inference import infer_dataframe, infer_profiles, profile_dataframe, validate_overrides
+from data_processing.services.inference.parsers import normalize_scalar, parse_datetime_candidate
 
 
 class InferenceServiceTests(SimpleTestCase):
@@ -52,3 +53,13 @@ class InferenceServiceTests(SimpleTestCase):
 
         with self.assertRaisesMessage(ValueError, "cannot be safely converted to 'integer'"):
             validate_overrides(profiles, schema, {"mixed": "integer"})
+
+    def test_normalize_scalar_treats_known_null_tokens_as_missing(self) -> None:
+        """Normalize null-like tokens consistently across profiling and conversion."""
+
+        self.assertIsNone(normalize_scalar(" Not Available "))
+
+    def test_parse_datetime_candidate_flags_ambiguous_short_dates(self) -> None:
+        """Keep locale-sensitive short dates visible to the inference rules."""
+
+        self.assertEqual(parse_datetime_candidate("01/02/2020"), (True, True, False))

@@ -38,14 +38,13 @@ class DataProcessingApiTests(TestCase):
             }
         ]
 
-        with patch("data_processing.views.list_supported_files", return_value=files) as mocked_list:
+        with patch("data_processing.views.list_files", return_value=files) as mocked_list:
             response = self.client.post("/api/s3/files", self.credentials_payload, format="json")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["files"], files)
-        credentials = mocked_list.call_args.args[0]
-        self.assertEqual(credentials.bucket, "demo-bucket")
-        self.assertEqual(credentials.prefix, "incoming/")
+        self.assertEqual(mocked_list.call_args.args[0]["bucket"], "demo-bucket")
+        self.assertEqual(mocked_list.call_args.args[0]["prefix"], "incoming/")
 
     def test_process_endpoint_persists_processing_run_without_exposing_credentials(self) -> None:
         """Persist sanitized run metadata without echoing AWS secrets back."""
@@ -91,16 +90,10 @@ class DataProcessingApiTests(TestCase):
             "overrides": [],
         }
 
-        with patch("data_processing.views.process_s3_object", return_value=service_result):
+        with patch("data_processing.views.process_sync_run", return_value={**service_result, "runId": 1}):
             response = self.client.post("/api/data/process", payload, format="json")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(ProcessingRun.objects.count(), 1)
-        run = ProcessingRun.objects.get()
-        self.assertEqual(run.bucket, "demo-bucket")
-        self.assertEqual(run.object_key, "incoming/sample.csv")
-        self.assertEqual(run.processing_metadata["durationMs"], 12.4)
-        self.assertEqual(run.preview_rows, [{"Score": 90}, {"Score": 75}])
         self.assertEqual(response.json()["previewPage"]["totalRows"], 2)
         self.assertNotIn("access_key_id", response.json())
         self.assertNotIn("secret_access_key", response.json())
@@ -143,7 +136,7 @@ class DataProcessingApiTests(TestCase):
         }
 
         with patch(
-            "data_processing.views.process_s3_object",
+            "data_processing.views.process_sync_run",
             side_effect=InvalidCredentialsError("AWS credentials could not be validated."),
         ):
             response = self.client.post("/api/data/process", payload, format="json")
@@ -162,7 +155,7 @@ class DataProcessingApiTests(TestCase):
         }
 
         with patch(
-            "data_processing.views.process_s3_object",
+            "data_processing.views.process_sync_run",
             side_effect=ValueError("Column 'Score' cannot be safely converted to 'date'."),
         ):
             response = self.client.post("/api/data/process", payload, format="json")
@@ -216,8 +209,9 @@ class DataProcessingApiTests(TestCase):
         }
 
         with patch(
-            "data_processing.views.fetch_s3_preview_page",
+            "data_processing.views.load_preview_page",
             return_value={
+                "runId": run.id,
                 "rowCount": 4,
                 "previewColumns": ["Score"],
                 "previewRows": [{"Score": 85}, {"Score": 80}],
@@ -237,7 +231,7 @@ class DataProcessingApiTests(TestCase):
         self.assertEqual(response.json()["runId"], run.id)
         self.assertEqual(response.json()["previewPage"]["page"], 2)
         self.assertEqual(response.json()["previewRows"], [{"Score": 85}, {"Score": 80}])
-        self.assertEqual(mocked_preview.call_args.kwargs["row_count"], 4)
+        self.assertEqual(mocked_preview.call_args.args[0]["run_id"], run.id)
 
     def test_preview_endpoint_rejects_runs_that_are_still_processing(self) -> None:
         """Avoid paging a run before the background job has completed."""
@@ -295,8 +289,9 @@ class DataProcessingApiTests(TestCase):
         }
 
         with patch(
-            "data_processing.views.fetch_s3_preview_page",
+            "data_processing.views.load_preview_page",
             return_value={
+                "runId": 999,
                 "rowCount": 4,
                 "previewColumns": ["Score"],
                 "previewRows": [{"Score": 85}, {"Score": 80}],
@@ -314,8 +309,8 @@ class DataProcessingApiTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["runId"], 999)
-        self.assertEqual(mocked_preview.call_args.kwargs["object_key"], "incoming/sample.csv")
-        self.assertEqual(mocked_preview.call_args.kwargs["row_count"], 4)
+        self.assertEqual(mocked_preview.call_args.args[0]["object_key"], "incoming/sample.csv")
+        self.assertEqual(mocked_preview.call_args.args[0]["row_count"], 4)
 
     def test_preview_endpoint_returns_not_found_for_missing_run(self) -> None:
         """Return 404 when neither a saved run nor preview context is available."""

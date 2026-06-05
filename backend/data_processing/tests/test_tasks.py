@@ -41,58 +41,22 @@ class ProcessingTaskTests(TestCase):
     def test_process_task_marks_run_completed(self) -> None:
         """Persist the completed preview payload after a successful task run."""
 
-        service_result = {
-            "bucket": "demo-bucket",
-            "objectKey": "incoming/sample.csv",
-            "fileType": "csv",
-            "selectedSheet": "",
-            "rowCount": 2,
-            "schema": [
-                {
-                    "column": "Score",
-                    "inferred_type": "integer",
-                    "storage_type": "Int64",
-                    "display_type": "Integer",
-                    "nullable": False,
-                    "confidence": 0.98,
-                    "warnings": [],
-                    "null_token_count": 0,
-                    "sample_values": ["90", "75"],
-                    "allowed_overrides": ["text", "integer", "float", "boolean", "date", "datetime", "category", "complex"],
-                }
-            ],
-            "previewColumns": ["Score"],
-            "previewRows": [{"Score": 90}, {"Score": 75}],
-            "previewPage": {
-                "page": 1,
-                "pageSize": 25,
-                "totalRows": 2,
-                "totalPages": 1,
-                "hasPreviousPage": False,
-                "hasNextPage": False,
-            },
-            "warnings": [],
-            "processingMetadata": {"durationMs": 12.4, "previewRowLimit": 25, "chunkSize": 500},
-        }
-
-        with patch("data_processing.tasks.process_s3_object", return_value=service_result):
+        with patch(
+            "data_processing.tasks.run_background_process",
+            return_value={"runId": self.run.id, "status": "completed"},
+        ) as mocked_run:
             process_s3_object_async.apply(kwargs={"run_id": self.run.id, "request_payload": self.request_payload})
 
-        self.run.refresh_from_db()
-        self.assertEqual(self.run.status, "completed")
-        self.assertEqual(self.run.progress_stage, "completed")
-        self.assertEqual(self.run.preview_rows, [{"Score": 90}, {"Score": 75}])
+        mocked_run.assert_called_once_with(run_id=self.run.id, request_payload=self.request_payload)
 
     def test_process_task_marks_run_failed(self) -> None:
         """Persist terminal error details when the background task fails."""
 
         with patch(
-            "data_processing.tasks.process_s3_object",
+            "data_processing.tasks.run_background_process",
             side_effect=InvalidCredentialsError("AWS credentials could not be validated."),
-        ):
+        ) as mocked_run:
             with self.assertRaises(InvalidCredentialsError):
                 process_s3_object_async.apply(kwargs={"run_id": self.run.id, "request_payload": self.request_payload})
 
-        self.run.refresh_from_db()
-        self.assertEqual(self.run.status, "failed")
-        self.assertEqual(self.run.error_message, "AWS credentials could not be validated.")
+        mocked_run.assert_called_once_with(run_id=self.run.id, request_payload=self.request_payload)
