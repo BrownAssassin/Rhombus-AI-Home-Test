@@ -27,8 +27,10 @@ from .s3 import (
 )
 from .staging import (
     STAGED_FILE_CACHE,
+    STAGED_FILE_CACHE_CONFIG,
     StagedFileCache,
     StagedFileCacheEntry,
+    StagedFileCacheConfig,
     StagedFileLease,
     clear_staged_file_cache,
     lease_staged_s3_object,
@@ -48,8 +50,10 @@ __all__ = [
     "S3Credentials",
     "S3ObjectMetadata",
     "STAGED_FILE_CACHE",
+    "STAGED_FILE_CACHE_CONFIG",
     "StagedFileCache",
     "StagedFileCacheEntry",
+    "StagedFileCacheConfig",
     "StagedFileLease",
     "UnsupportedFileTypeError",
     "build_s3_client",
