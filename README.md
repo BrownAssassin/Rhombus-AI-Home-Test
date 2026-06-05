@@ -62,9 +62,11 @@ The backend now separates concerns more explicitly so the data-processing workfl
 - Service layer: `backend/data_processing/services/processing/` and `backend/data_processing/services/inference/` contain the mechanics for S3 access, staged-file reuse, schema inference, conversion, and preview generation.
 - Task layer: Celery tasks are thin infrastructure wrappers that delegate to application-layer background-run functions instead of mixing orchestration and persistence directly.
 - Run store: `ProcessingRun` now has queryset/manager helpers for recent-run, active-run, and object-filtered queries so the jobs-tray path can use lighter summary reads while run-detail and preview paths still load the full payload.
+- Run lifecycle: tracked-run internals are split between creation, query, and lifecycle helpers, while the existing `run_tracking` import surface stays as a stable compatibility facade for callers.
 - Run payloads: summary and detail serialization are split intentionally, which keeps `GET /api/data/runs` from touching large JSON blobs unless a caller asks for one run in detail.
-- Public processing contracts: Spark and preview paging now rely on public staged-file leasing and preview-metadata helpers instead of importing private processing internals.
-- Observability: the processing layer emits lightweight stage timing logs for S3 listing, object staging, schema profiling, preview generation, and Spark comparison without logging any credentials or secrets.
+- Typed payload boundaries: internal request, queue, preview, Spark, and run payloads now flow through explicit contracts instead of raw cross-layer `dict[str, object]` shapes.
+- Public processing contracts: Spark and preview paging now rely on public staged-file leasing and preview-metadata helpers instead of importing private processing internals, and the staging layer itself is split into cache policy, cache store, and lease helpers.
+- Observability: backend timing and lifecycle logs flow through one shared helper, which keeps S3, staging, preview, Spark, and run-transition events consistent without logging any credentials or secrets.
 
 ## Requirements
 
