@@ -56,7 +56,7 @@ class ApplicationLayerTests(TestCase):
             "processingMetadata": {"durationMs": 12.4, "previewRowLimit": 25, "chunkSize": 500},
         }
 
-        with patch("data_processing.application.process_runs.process_s3_object", return_value=service_result):
+        with patch("data_processing.application.process_run_sync.process_s3_object", return_value=service_result):
             payload = process_sync_run(self.validated_data)
 
         run = ProcessingRun.objects.get()
