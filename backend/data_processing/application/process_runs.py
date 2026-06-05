@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from data_processing.contracts import ProcessResponsePayload, ProcessingTaskRequestPayload, SparkTaskRequestPayload
 from .errors import InvalidSourceRunError, RunNotFoundError, SourceRunNotCompletedError, TaskQueueError
 from .request_data import build_credentials, build_overrides
 from data_processing.services.processing import (
@@ -24,7 +25,7 @@ from data_processing.services.run_tracking import (
 )
 
 
-def process_sync_run(validated_data: dict) -> dict[str, object]:
+def process_sync_run(validated_data: dict) -> ProcessResponsePayload:
     """Process a file synchronously and return the stable API payload."""
 
     credentials = build_credentials(validated_data)
@@ -95,7 +96,7 @@ def queue_spark_comparison(validated_data: dict, *, delay_callable) -> dict[str,
         raise UnsupportedFileTypeError("Spark comparison currently supports CSV files only.")
 
     comparison_run = create_queued_spark_comparison_run(source_run)
-    request_payload = {
+    request_payload: SparkTaskRequestPayload = {
         "access_key_id": credentials.access_key_id,
         "secret_access_key": credentials.secret_access_key,
         "session_token": credentials.session_token,
@@ -124,7 +125,7 @@ def queue_spark_comparison(validated_data: dict, *, delay_callable) -> dict[str,
     }
 
 
-def run_background_process(*, run_id: int, request_payload: dict[str, object]) -> dict[str, object]:
+def run_background_process(*, run_id: int, request_payload: ProcessingTaskRequestPayload) -> dict[str, object]:
     """Execute the queued Pandas processing flow and persist run lifecycle updates."""
 
     run = get_run(run_id)
@@ -152,7 +153,7 @@ def run_background_process(*, run_id: int, request_payload: dict[str, object]) -
         raise
 
 
-def run_background_spark_comparison(*, run_id: int, request_payload: dict[str, object]) -> dict[str, object]:
+def run_background_spark_comparison(*, run_id: int, request_payload: SparkTaskRequestPayload) -> dict[str, object]:
     """Execute the queued experimental Spark comparison and persist lifecycle updates."""
 
     from data_processing.services.spark_processing import run_spark_csv_comparison
@@ -177,7 +178,10 @@ def run_background_spark_comparison(*, run_id: int, request_payload: dict[str, o
         raise
 
 
-def _build_processing_request_payload(credentials: S3Credentials, validated_data: dict) -> dict[str, object]:
+def _build_processing_request_payload(
+    credentials: S3Credentials,
+    validated_data: dict,
+) -> ProcessingTaskRequestPayload:
     """Serialize the validated process request for a background task."""
 
     return {
@@ -194,7 +198,7 @@ def _build_processing_request_payload(credentials: S3Credentials, validated_data
     }
 
 
-def _build_credentials_from_payload(payload: dict[str, object]) -> S3Credentials:
+def _build_credentials_from_payload(payload: ProcessingTaskRequestPayload | SparkTaskRequestPayload) -> S3Credentials:
     """Rehydrate request-scoped S3 credentials inside a background task."""
 
     return S3Credentials(

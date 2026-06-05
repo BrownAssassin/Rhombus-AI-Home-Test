@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+import logging
 import os
 from pathlib import Path
+from time import perf_counter
 from typing import Callable
 
 import pandas as pd
@@ -16,6 +18,7 @@ from .s3 import MAX_EXCEL_SIZE_BYTES
 
 CSV_CHUNK_SIZE = int(os.getenv("CSV_CHUNK_SIZE", "500"))
 ProgressReporter = Callable[[str, int], None]
+logger = logging.getLogger(__name__)
 
 
 def read_local_csv_chunks(file_path: Path) -> Iterator[pd.DataFrame]:
@@ -80,6 +83,7 @@ def process_local_csv_file(
 ) -> dict[str, object]:
     """Infer schema from a local CSV while keeping preview work bounded."""
 
+    started = perf_counter()
     columns = fetch_local_csv_columns(file_path)
     from data_processing.services.inference import create_profiles, update_profiles_from_dataframe
 
@@ -99,6 +103,15 @@ def process_local_csv_file(
         )
 
     schema, warnings = build_schema_from_profiles(profiles, overrides)
+    logger.info(
+        "processing.local_csv.profiled",
+        extra={
+            "file_path": str(file_path),
+            "row_count": row_count,
+            "column_count": len(columns),
+            "duration_ms": round((perf_counter() - started) * 1000, 2),
+        },
+    )
     if progress_callback is not None:
         progress_callback("building_preview", 85)
 
