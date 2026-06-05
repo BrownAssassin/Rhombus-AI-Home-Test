@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from data_processing.contracts import ProcessingTaskRequestPayload, SparkTaskRequestPayload
+from data_processing.contracts import ProcessRequestPayload, ProcessingTaskRequestPayload, SparkTaskRequestPayload
 from .request_data import build_overrides
 from data_processing.services.processing import S3Credentials
 
 
 def build_processing_task_request(
     credentials: S3Credentials,
-    validated_data: dict,
+    validated_data: ProcessRequestPayload,
 ) -> ProcessingTaskRequestPayload:
     """Serialize the validated process request for a background task."""
 

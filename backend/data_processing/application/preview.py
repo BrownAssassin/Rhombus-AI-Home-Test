@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from data_processing.contracts import PreviewResponsePayload
+from data_processing.contracts import PreviewContextPayload, PreviewRequestPayload, PreviewResponsePayload
 from .errors import RunNotCompletedError, RunNotFoundError
 from .request_data import build_credentials, build_preview_context
 from data_processing.services.processing import fetch_s3_preview_page
 from data_processing.services.run_tracking import get_run
 
 
-def load_preview_page(validated_data: dict) -> PreviewResponsePayload:
+def load_preview_page(validated_data: PreviewRequestPayload) -> PreviewResponsePayload:
     """Page through processed rows using a saved run or stateless preview context."""
 
     credentials = build_credentials(validated_data)

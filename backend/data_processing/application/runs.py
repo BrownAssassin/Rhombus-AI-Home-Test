@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from data_processing.contracts import RunDetailPayload, RunSummaryPayload
+from data_processing.contracts import RunDetailPayload, RunListRequestPayload, RunListResponsePayload, RunSummaryPayload
 from .errors import RunNotFoundError
 from data_processing.services.run_payloads import serialize_run_detail, serialize_run_summary
 from data_processing.services.run_tracking import get_run, list_runs
@@ -17,7 +17,7 @@ def get_run_status_payload(run_id: int) -> RunDetailPayload:
     return serialize_run_detail(run)
 
 
-def list_recent_runs_payload(validated_data: dict) -> dict[str, list[RunSummaryPayload]]:
+def list_recent_runs_payload(validated_data: RunListRequestPayload) -> RunListResponsePayload:
     """Return recent runs for the jobs tray using existing query filters."""
 
     object_key = validated_data.get("object_key")

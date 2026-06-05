@@ -11,6 +11,8 @@ from typing import Callable
 
 import pandas as pd
 
+from data_processing.contracts import PreviewRow, ProcessResultPayload
+
 from .errors import FileTooLargeError, ProcessingServiceError, ResourceLimitError, RESOURCE_LIMIT_MESSAGE, S3AccessError
 from .preview import build_preview_page_metadata, build_schema_from_profiles, capture_preview_frame, convert_preview_slice
 from .s3 import MAX_EXCEL_SIZE_BYTES
@@ -80,7 +82,7 @@ def process_local_csv_file(
     preview_row_limit: int,
     *,
     progress_callback: ProgressReporter | None = None,
-) -> dict[str, object]:
+) -> ProcessResultPayload:
     """Infer schema from a local CSV while keeping preview work bounded."""
 
     started = perf_counter()
@@ -115,7 +117,7 @@ def process_local_csv_file(
     if progress_callback is not None:
         progress_callback("building_preview", 85)
 
-    preview_rows: list[dict[str, object]] = []
+    preview_rows: list[PreviewRow] = []
     preview_columns: list[str] = columns
     if preview_frames:
         preview_source = pd.concat(preview_frames, ignore_index=True)

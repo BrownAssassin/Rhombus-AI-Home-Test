@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from data_processing.contracts import ProcessResponsePayload
+from data_processing.contracts import ProcessRequestPayload, ProcessResponsePayload
 from .request_data import build_credentials, build_overrides
 from data_processing.services.processing import process_s3_object
 from data_processing.services.run_tracking import create_completed_process_run
 
 
-def process_sync_run(validated_data: dict) -> ProcessResponsePayload:
+def process_sync_run(validated_data: ProcessRequestPayload) -> ProcessResponsePayload:
     """Process a file synchronously and return the stable API payload."""
 
     credentials = build_credentials(validated_data)

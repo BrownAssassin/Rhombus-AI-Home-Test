@@ -7,7 +7,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import Callable
 
-from data_processing.contracts import PreviewResultPayload, ProcessResultPayload
+from data_processing.contracts import PreviewResultPayload, ProcessResultPayload, SchemaItem
 
 from .csv_pipeline import fetch_csv_preview_page, process_staged_csv
 from .errors import ProcessingServiceError, ResourceLimitError, RESOURCE_LIMIT_MESSAGE
@@ -88,7 +88,7 @@ def fetch_s3_preview_page(
     object_key: str,
     file_type: str,
     selected_sheet: str,
-    schema: list[dict[str, object]],
+    schema: list[SchemaItem],
     row_count: int,
     page: int,
     page_size: int,

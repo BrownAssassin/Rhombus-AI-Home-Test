@@ -2,11 +2,103 @@
 
 from __future__ import annotations
 
-from typing import Any, NotRequired, TypedDict
+from typing import NotRequired, TypeAlias, TypedDict
 
 
-SchemaItem = dict[str, Any]
-PreviewRow = dict[str, object]
+JSONScalar: TypeAlias = str | int | float | bool | None
+JSONValue: TypeAlias = JSONScalar | list["JSONValue"] | dict[str, "JSONValue"]
+PreviewRow: TypeAlias = dict[str, JSONValue]
+
+
+class SchemaItem(TypedDict):
+    """One inferred schema entry returned from the Pandas inference pipeline."""
+
+    column: str
+    inferred_type: str
+    storage_type: str
+    display_type: str
+    nullable: bool
+    confidence: float
+    warnings: list[str]
+    null_token_count: int
+    sample_values: list[str]
+    allowed_overrides: list[str]
+
+
+class SupportedFilePayload(TypedDict):
+    """One supported S3 object surfaced to the file browser UI."""
+
+    key: str
+    size: int
+    lastModified: str | None
+    format: str
+
+
+class OverrideItemPayload(TypedDict):
+    """One validated override row coming from the UI."""
+
+    column: str
+    target_type: str
+
+
+class ValidatedCredentialsPayload(TypedDict):
+    """Validated S3 credential and bucket fields shared by request shapes."""
+
+    access_key_id: str
+    secret_access_key: str
+    session_token: str
+    region: str
+    bucket: str
+    prefix: str
+
+
+class ProcessRequestPayload(ValidatedCredentialsPayload):
+    """Validated request payload for sync and async dataset processing."""
+
+    object_key: str
+    sheet_name: str
+    preview_row_limit: int
+    overrides: list[OverrideItemPayload]
+
+
+class SparkCompareRequestPayload(ValidatedCredentialsPayload):
+    """Validated request payload for experimental Spark comparison queueing."""
+
+    source_run_id: int
+    page: int
+    page_size: int
+
+
+class RunListRequestPayload(TypedDict, total=False):
+    """Validated query params for recent-run listing."""
+
+    object_key: str
+    limit: int
+
+
+class PreviewContextPayload(TypedDict):
+    """Stateless preview context for loading later pages without a saved run."""
+
+    object_key: str
+    file_type: str
+    selected_sheet: str
+    row_count: int
+    schema: list[SchemaItem]
+    preview_columns: list[str]
+
+
+class PreviewRequestPayload(ValidatedCredentialsPayload, total=False):
+    """Validated request payload for loading later preview pages."""
+
+    run_id: int
+    object_key: str
+    file_type: str
+    selected_sheet: str
+    row_count: int
+    schema: list[SchemaItem]
+    preview_columns: list[str]
+    page: int
+    page_size: int
 
 
 class PreviewPagePayload(TypedDict):
@@ -122,6 +214,24 @@ class SparkTaskRequestPayload(TypedDict):
     page_size: int
 
 
+class QueuedRunPayload(TypedDict, total=False):
+    """Stable queueing response payload returned by async endpoints."""
+
+    runId: int
+    taskId: str
+    runType: str
+    status: str
+    engine: str
+    sourceRunId: int
+
+
+class TaskExecutionPayload(TypedDict):
+    """Stable background-task result payload used by Celery wrappers."""
+
+    runId: int
+    status: str
+
+
 class RunSummaryPayload(TypedDict):
     """Run payload returned by jobs-tray style listing endpoints."""
 
@@ -154,3 +264,9 @@ class RunDetailPayload(RunSummaryPayload, total=False):
     warnings: list[str]
     processingMetadata: ProcessingMetadataPayload
     sparkComparison: SparkComparisonResultPayload
+
+
+class RunListResponsePayload(TypedDict):
+    """Stable recent-run list response returned from the application layer."""
+
+    runs: list[RunSummaryPayload]

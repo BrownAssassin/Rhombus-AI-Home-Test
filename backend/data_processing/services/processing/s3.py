@@ -7,10 +7,11 @@ import logging
 from pathlib import Path
 import tempfile
 from time import perf_counter
-from typing import Any
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
+
+from data_processing.contracts import SupportedFilePayload
 
 from .errors import FileTooLargeError, InvalidCredentialsError, ProcessingServiceError, S3AccessError, UnsupportedFileTypeError
 
@@ -67,12 +68,12 @@ def map_client_error(exc: ClientError) -> ProcessingServiceError:
     return ProcessingServiceError(exc.response.get("Error", {}).get("Message", "An AWS error occurred."))
 
 
-def list_supported_files(credentials: S3Credentials) -> list[dict[str, Any]]:
+def list_supported_files(credentials: S3Credentials) -> list[SupportedFilePayload]:
     """List supported CSV and Excel objects for the selected bucket/prefix."""
 
     client = build_s3_client(credentials)
     paginator = client.get_paginator("list_objects_v2")
-    files: list[dict[str, Any]] = []
+    files: list[SupportedFilePayload] = []
     started = perf_counter()
 
     try:

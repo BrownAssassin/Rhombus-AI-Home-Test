@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from data_processing.contracts import QueuedRunPayload, ProcessRequestPayload, SparkCompareRequestPayload
 from .errors import InvalidSourceRunError, RunNotFoundError, SourceRunNotCompletedError, TaskQueueError
 from .process_run_payloads import build_processing_task_request, build_spark_task_request
 from .request_data import build_credentials
@@ -14,8 +15,7 @@ from data_processing.services.run_tracking import (
     mark_run_queued,
 )
 
-
-def queue_process_run(validated_data: dict, *, delay_callable) -> dict[str, object]:
+def queue_process_run(validated_data: ProcessRequestPayload, *, delay_callable) -> QueuedRunPayload:
     """Create a queued processing run and enqueue the Celery task."""
 
     credentials = build_credentials(validated_data)
@@ -43,8 +43,7 @@ def queue_process_run(validated_data: dict, *, delay_callable) -> dict[str, obje
         "engine": run.engine,
     }
 
-
-def queue_spark_comparison(validated_data: dict, *, delay_callable) -> dict[str, object]:
+def queue_spark_comparison(validated_data: SparkCompareRequestPayload, *, delay_callable) -> QueuedRunPayload:
     """Create a queued Spark comparison run and enqueue the Celery task."""
 
     credentials = build_credentials(validated_data)

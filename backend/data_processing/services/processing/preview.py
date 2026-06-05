@@ -5,11 +5,10 @@ from __future__ import annotations
 from collections.abc import Iterator
 import logging
 from time import perf_counter
-from typing import Any
 
 import pandas as pd
 
-from data_processing.contracts import PreviewPagePayload, PreviewResultPayload, ProcessResultPayload, SchemaItem
+from data_processing.contracts import PreviewPagePayload, PreviewResultPayload, PreviewRow, ProcessResultPayload, SchemaItem
 
 from data_processing.services.inference import (
     convert_dataframe,
@@ -57,7 +56,7 @@ def convert_preview_slice(
     schema: list[SchemaItem],
     *,
     limit: int,
-) -> tuple[list[str], list[dict[str, Any]]]:
+) -> tuple[list[str], list[PreviewRow]]:
     """Convert only the rows needed for the current preview slice."""
 
     if limit <= 0 or df.empty:
@@ -91,14 +90,14 @@ def paginate_converted_chunks(
     *,
     page: int,
     page_size: int,
-) -> tuple[list[str], list[dict[str, Any]]]:
+) -> tuple[list[str], list[PreviewRow]]:
     """Convert just the requested page while streaming through CSV chunks."""
 
     start = (page - 1) * page_size
     end = start + page_size
     seen_rows = 0
     page_columns = [item["column"] for item in schema]
-    page_rows: list[dict[str, Any]] = []
+    page_rows: list[PreviewRow] = []
 
     for chunk in chunks:
         chunk_end = seen_rows + len(chunk)

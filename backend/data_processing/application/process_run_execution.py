@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from data_processing.contracts import ProcessingTaskRequestPayload, SparkTaskRequestPayload
+from data_processing.contracts import ProcessingTaskRequestPayload, SparkTaskRequestPayload, TaskExecutionPayload
 from .errors import RunNotFoundError
 from .process_run_payloads import build_credentials_from_task_payload
 from data_processing.services.processing import ProcessingServiceError, process_s3_object
@@ -16,7 +16,7 @@ from data_processing.services.run_tracking import (
 from data_processing.services.spark_processing import run_spark_csv_comparison
 
 
-def run_background_process(*, run_id: int, request_payload: ProcessingTaskRequestPayload) -> dict[str, object]:
+def run_background_process(*, run_id: int, request_payload: ProcessingTaskRequestPayload) -> TaskExecutionPayload:
     """Execute the queued Pandas processing flow and persist run lifecycle updates."""
 
     run = get_run(run_id)
@@ -44,7 +44,7 @@ def run_background_process(*, run_id: int, request_payload: ProcessingTaskReques
         raise
 
 
-def run_background_spark_comparison(*, run_id: int, request_payload: SparkTaskRequestPayload) -> dict[str, object]:
+def run_background_spark_comparison(*, run_id: int, request_payload: SparkTaskRequestPayload) -> TaskExecutionPayload:
     """Execute the queued experimental Spark comparison and persist lifecycle updates."""
 
     run = get_run(run_id)

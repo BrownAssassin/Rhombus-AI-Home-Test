@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import pandas as pd
+
+from data_processing.contracts import SchemaItem
 
 from .constants import (
     ALLOWED_OVERRIDE_TYPES,
@@ -84,13 +84,13 @@ def build_column_inference(profile: ColumnProfile) -> ColumnInference:
     )
 
 
-def infer_profiles(profiles: dict[str, ColumnProfile]) -> list[dict[str, Any]]:
+def infer_profiles(profiles: dict[str, ColumnProfile]) -> list[SchemaItem]:
     """Infer the full schema from already-collected column profiles."""
 
     return [build_column_inference(profile).to_dict() for profile in profiles.values()]
 
 
-def infer_dataframe(df: pd.DataFrame) -> list[dict[str, Any]]:
+def infer_dataframe(df: pd.DataFrame) -> list[SchemaItem]:
     """Infer a schema directly from an in-memory dataframe."""
 
     return infer_profiles(profile_dataframe(df))
