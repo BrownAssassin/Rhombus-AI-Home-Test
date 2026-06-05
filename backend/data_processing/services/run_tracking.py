@@ -4,25 +4,32 @@ from __future__ import annotations
 
 from django.utils import timezone
 
+from data_processing.contracts import ProcessResultPayload, SparkComparisonResultPayload
 from data_processing.models import ProcessingRun
 
 
 def get_run(run_id: int) -> ProcessingRun | None:
     """Return one tracked run by id or None when it no longer exists."""
 
-    return ProcessingRun.objects.filter(pk=run_id).first()
+    return ProcessingRun.objects.detail_fields().filter(pk=run_id).first()
+
+
+def get_active_run(run_id: int) -> ProcessingRun | None:
+    """Return one active tracked run or None when it is no longer pending."""
+
+    return ProcessingRun.objects.active().detail_fields().filter(pk=run_id).first()
 
 
 def list_runs(*, object_key: str | None = None, limit: int = 10):
     """Return recent runs ordered newest-first with an optional file filter."""
 
-    runs = ProcessingRun.objects.all()
+    runs = ProcessingRun.objects.summary_fields()
     if object_key is not None:
-        runs = runs.filter(object_key=object_key)
-    return runs[:limit]
+        runs = runs.for_object(object_key)
+    return runs.recent(limit)
 
 
-def create_completed_process_run(result: dict[str, Any]) -> ProcessingRun:
+def create_completed_process_run(result: ProcessResultPayload) -> ProcessingRun:
     """Persist the synchronous process response as a completed tracked run."""
 
     now = timezone.now()
@@ -126,7 +133,7 @@ def mark_run_processing(
     return run
 
 
-def mark_run_completed(run: ProcessingRun, result: dict[str, Any]) -> ProcessingRun:
+def mark_run_completed(run: ProcessingRun, result: ProcessResultPayload) -> ProcessingRun:
     """Persist the finished processing payload in the tracked run record."""
 
     run.status = "completed"
@@ -169,7 +176,7 @@ def mark_run_completed(run: ProcessingRun, result: dict[str, Any]) -> Processing
     return run
 
 
-def mark_run_comparison_completed(run: ProcessingRun, result: dict[str, Any]) -> ProcessingRun:
+def mark_run_comparison_completed(run: ProcessingRun, result: SparkComparisonResultPayload) -> ProcessingRun:
     """Persist a completed Spark comparison without flattening it into the Pandas shape."""
 
     run.status = "completed"

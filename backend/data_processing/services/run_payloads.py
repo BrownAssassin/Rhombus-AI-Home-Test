@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Any
-
+from data_processing.contracts import RunDetailPayload, RunSummaryPayload
 from data_processing.models import ProcessingRun
 
 
-def serialize_run(run: ProcessingRun, *, include_payload: bool = True) -> dict[str, Any]:
-    """Return the stable API payload for one tracked processing run."""
+def serialize_run_summary(run: ProcessingRun) -> RunSummaryPayload:
+    """Return the stable jobs-tray payload for one tracked processing run."""
 
-    payload = {
+    return {
         "runId": run.id,
         "taskId": run.task_id,
         "runType": run.run_type,
@@ -28,7 +27,13 @@ def serialize_run(run: ProcessingRun, *, include_payload: bool = True) -> dict[s
         "fileType": run.file_type,
         "selectedSheet": run.sheet_name,
     }
-    if not include_payload or run.status != "completed":
+
+
+def serialize_run_detail(run: ProcessingRun) -> RunDetailPayload:
+    """Return the full run-status payload for one tracked processing run."""
+
+    payload: RunDetailPayload = serialize_run_summary(run)
+    if run.status != "completed":
         return payload
     if run.run_type == "spark_compare":
         payload["sparkComparison"] = run.comparison_payload
