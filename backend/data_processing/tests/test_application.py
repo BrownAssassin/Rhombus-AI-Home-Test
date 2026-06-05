@@ -9,6 +9,7 @@ from data_processing.application.errors import RunNotFoundError
 from data_processing.application.preview import load_preview_page
 from data_processing.application.process_runs import process_sync_run, queue_process_run
 from data_processing.application.runs import get_run_status_payload
+from data_processing.services.run_tracking import get_active_run, list_runs
 from data_processing.models import ProcessingRun
 
 
@@ -118,3 +119,56 @@ class ApplicationLayerTests(TestCase):
         self.assertEqual(payload["runId"], run.id)
         self.assertEqual(payload["previewRows"], [{"Score": 85}, {"Score": 80}])
         self.assertEqual(mocked_preview.call_args.kwargs["row_count"], 4)
+
+    def test_list_runs_defers_heavy_payload_fields_for_recent_run_queries(self) -> None:
+        """Return recent runs without eagerly loading the heavyweight JSON payloads."""
+
+        ProcessingRun.objects.create(
+            bucket="demo-bucket",
+            object_key="incoming/sample.csv",
+            file_type="csv",
+            status="completed",
+            engine="pandas",
+            schema=[{"column": "Score"}],
+            warnings=["warning"],
+            preview_columns=["Score"],
+            preview_rows=[{"Score": 90}],
+            preview_page={"page": 1},
+            comparison_payload={"engine": "spark"},
+            processing_metadata={"durationMs": 12.4},
+        )
+
+        run = list(list_runs(object_key="incoming/sample.csv", limit=1))[0]
+
+        self.assertTrue(
+            {
+                "schema",
+                "warnings",
+                "preview_columns",
+                "preview_rows",
+                "preview_page",
+                "comparison_payload",
+                "processing_metadata",
+            }.issubset(run.get_deferred_fields())
+        )
+
+    def test_get_active_run_only_returns_pending_runs(self) -> None:
+        """Expose a focused helper for queued and processing run lookups."""
+
+        completed_run = ProcessingRun.objects.create(
+            bucket="demo-bucket",
+            object_key="incoming/completed.csv",
+            file_type="csv",
+            status="completed",
+            engine="pandas",
+        )
+        queued_run = ProcessingRun.objects.create(
+            bucket="demo-bucket",
+            object_key="incoming/queued.csv",
+            file_type="csv",
+            status="queued",
+            engine="pandas",
+        )
+
+        self.assertIsNone(get_active_run(completed_run.id))
+        self.assertEqual(get_active_run(queued_run.id).id, queued_run.id)

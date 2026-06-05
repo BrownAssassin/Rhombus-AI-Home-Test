@@ -61,6 +61,10 @@ The backend now separates concerns more explicitly so the data-processing workfl
 - Application layer: `backend/data_processing/application/` owns orchestration for file browsing, sync processing, async queueing, run lookups, and preview paging.
 - Service layer: `backend/data_processing/services/processing/` and `backend/data_processing/services/inference/` contain the mechanics for S3 access, staged-file reuse, schema inference, conversion, and preview generation.
 - Task layer: Celery tasks are thin infrastructure wrappers that delegate to application-layer background-run functions instead of mixing orchestration and persistence directly.
+- Run store: `ProcessingRun` now has queryset/manager helpers for recent-run, active-run, and object-filtered queries so the jobs-tray path can use lighter summary reads while run-detail and preview paths still load the full payload.
+- Run payloads: summary and detail serialization are split intentionally, which keeps `GET /api/data/runs` from touching large JSON blobs unless a caller asks for one run in detail.
+- Public processing contracts: Spark and preview paging now rely on public staged-file leasing and preview-metadata helpers instead of importing private processing internals.
+- Observability: the processing layer emits lightweight stage timing logs for S3 listing, object staging, schema profiling, preview generation, and Spark comparison without logging any credentials or secrets.
 
 ## Requirements
 

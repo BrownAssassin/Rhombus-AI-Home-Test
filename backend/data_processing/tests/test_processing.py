@@ -1,8 +1,11 @@
 """Service-level regression tests for the processing pipeline."""
 
-from datetime import datetime, timezone
+from contextlib import nullcontext
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.test import SimpleTestCase
@@ -19,6 +22,8 @@ from data_processing.services.processing import (
     process_s3_object,
 )
 from data_processing.services.processing.preview import build_preview_page_metadata
+from data_processing.services.processing.staging import StagedFileLease, lease_staged_s3_object
+from data_processing.services.spark_processing import run_spark_csv_comparison
 
 
 class FakePaginator:
@@ -64,6 +69,92 @@ class FakeS3Client:
 
         self.download_calls += 1
         fileobj.write(self.objects[Key])
+
+
+class FakeSparkField:
+    """Minimal Spark schema field stub for schema mapping tests."""
+
+    def __init__(self, name: str, spark_type: str, *, nullable: bool = True):
+        self.name = name
+        self.nullable = nullable
+        self.dataType = SimpleNamespace(simpleString=lambda: spark_type)
+
+
+class FakeSparkRow:
+    """Small row stub exposing Spark's asDict interface."""
+
+    def __init__(self, payload):
+        self.payload = payload
+
+    def asDict(self, recursive: bool = True):
+        return self.payload
+
+
+class FakeSparkZippedRows:
+    """Chainable zipWithIndex result for preview slicing tests."""
+
+    def __init__(self, items):
+        self.items = items
+
+    def filter(self, predicate):
+        self.items = [item for item in self.items if predicate(item)]
+        return self
+
+    def map(self, mapper):
+        self.items = [mapper(item) for item in self.items]
+        return self
+
+    def collect(self):
+        return self.items
+
+
+class FakeSparkRdd:
+    """Minimal RDD stub that supports zipWithIndex()."""
+
+    def __init__(self, rows):
+        self.rows = rows
+
+    def zipWithIndex(self):
+        return FakeSparkZippedRows([(FakeSparkRow(row), index) for index, row in enumerate(self.rows)])
+
+
+class FakeSparkDataFrame:
+    """Simplified Spark DataFrame stub for comparison tests."""
+
+    def __init__(self, *, rows, fields):
+        self._rows = rows
+        self.columns = list(rows[0].keys()) if rows else []
+        self.schema = SimpleNamespace(fields=fields)
+        self.rdd = FakeSparkRdd(rows)
+
+    def count(self):
+        return len(self._rows)
+
+
+class FakeSparkReader:
+    """Spark reader stub that records CSV read invocations."""
+
+    def __init__(self, dataframe):
+        self.dataframe = dataframe
+        self.csv_calls = 0
+
+    def option(self, *_args, **_kwargs):
+        return self
+
+    def csv(self, _path):
+        self.csv_calls += 1
+        return self.dataframe
+
+
+class FakeSparkSession:
+    """Minimal Spark session stub with a single reusable reader."""
+
+    def __init__(self, dataframe):
+        self.read = FakeSparkReader(dataframe)
+        self.stopped = False
+
+    def stop(self):
+        self.stopped = True
 
 
 class ProcessingServiceTests(SimpleTestCase):
@@ -308,3 +399,61 @@ class ProcessingServiceTests(SimpleTestCase):
 
         with self.assertRaises(InvalidPreviewPageError):
             build_preview_page_metadata(4, page=3, page_size=2)
+
+    def test_lease_staged_s3_object_releases_the_file_even_after_errors(self) -> None:
+        """Always release staged-file leases exposed through the public contract."""
+
+        lease = StagedFileLease(path=Path("demo.csv"), content_length=12, release_when_done=True)
+
+        with (
+            patch("data_processing.services.processing.staging.get_staged_s3_object_path", return_value=lease),
+            patch("data_processing.services.processing.staging.release_staged_file") as mocked_release,
+        ):
+            with self.assertRaises(RuntimeError):
+                with lease_staged_s3_object(object(), "demo-bucket", "incoming/demo.csv"):
+                    raise RuntimeError("boom")
+
+        mocked_release.assert_called_once_with(lease)
+
+    def test_run_spark_csv_comparison_reads_the_csv_once_and_serializes_preview_values(self) -> None:
+        """Use one inferred Spark read and normalize preview rows for JSON storage."""
+
+        dataframe = FakeSparkDataFrame(
+            rows=[
+                {
+                    "Date": date(2026, 6, 5),
+                    "OccurredAt": datetime(2026, 6, 5, 12, 30),
+                    "Amount": Decimal("12.50"),
+                    "Score": 90,
+                }
+            ],
+            fields=[
+                FakeSparkField("Date", "date"),
+                FakeSparkField("OccurredAt", "timestamp"),
+                FakeSparkField("Amount", "decimal"),
+                FakeSparkField("Score", "integer", nullable=False),
+            ],
+        )
+        spark = FakeSparkSession(dataframe)
+
+        with (
+            patch("data_processing.services.spark_processing.build_s3_client", return_value=object()),
+            patch(
+                "data_processing.services.spark_processing.lease_staged_s3_object",
+                return_value=nullcontext(SimpleNamespace(path=Path("fake.csv"))),
+            ),
+            patch("data_processing.services.spark_processing._create_spark_session", return_value=spark),
+        ):
+            result = run_spark_csv_comparison(
+                credentials=self.credentials,
+                object_key="incoming/sample.csv",
+                page=1,
+                page_size=25,
+            )
+
+        self.assertEqual(spark.read.csv_calls, 1)
+        self.assertTrue(spark.stopped)
+        self.assertEqual(result["previewRows"][0]["Date"], "2026-06-05")
+        self.assertEqual(result["previewRows"][0]["OccurredAt"], "2026-06-05T12:30:00")
+        self.assertEqual(result["previewRows"][0]["Amount"], "12.50")
+        self.assertEqual(result["sparkSchema"][0]["sparkType"], "date")
