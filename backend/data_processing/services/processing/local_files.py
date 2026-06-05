@@ -6,12 +6,12 @@ from collections.abc import Iterator
 import logging
 import os
 from pathlib import Path
-from time import perf_counter
 from typing import Callable
 
 import pandas as pd
 
 from data_processing.contracts import PreviewRow, ProcessResultPayload
+from data_processing.services.observability import elapsed_ms, log_stage_event, stage_started
 
 from .errors import FileTooLargeError, ProcessingServiceError, ResourceLimitError, RESOURCE_LIMIT_MESSAGE, S3AccessError
 from .preview import build_preview_page_metadata, build_schema_from_profiles, capture_preview_frame, convert_preview_slice
@@ -85,7 +85,7 @@ def process_local_csv_file(
 ) -> ProcessResultPayload:
     """Infer schema from a local CSV while keeping preview work bounded."""
 
-    started = perf_counter()
+    started = stage_started()
     columns = fetch_local_csv_columns(file_path)
     from data_processing.services.inference import create_profiles, update_profiles_from_dataframe
 
@@ -105,14 +105,13 @@ def process_local_csv_file(
         )
 
     schema, warnings = build_schema_from_profiles(profiles, overrides)
-    logger.info(
+    log_stage_event(
+        logger,
         "processing.local_csv.profiled",
-        extra={
-            "file_path": str(file_path),
-            "row_count": row_count,
-            "column_count": len(columns),
-            "duration_ms": round((perf_counter() - started) * 1000, 2),
-        },
+        file_path=str(file_path),
+        row_count=row_count,
+        column_count=len(columns),
+        duration_ms=elapsed_ms(started),
     )
     if progress_callback is not None:
         progress_callback("building_preview", 85)

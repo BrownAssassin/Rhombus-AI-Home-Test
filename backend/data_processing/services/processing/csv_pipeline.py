@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from data_processing.contracts import PreviewResultPayload, ProcessResultPayload, SchemaItem
+from data_processing.services.observability import log_stage_event
 
 from .local_files import process_local_csv_file, read_local_csv_chunks
 from .preview import fetch_local_csv_preview_page
@@ -34,9 +35,12 @@ def process_staged_csv(
             preview_row_limit,
             progress_callback=progress_callback,
         )
-        logger.info(
+        log_stage_event(
+            logger,
             "processing.csv.completed",
-            extra={"bucket": bucket, "object_key": object_key, "row_count": result["rowCount"]},
+            bucket=bucket,
+            object_key=object_key,
+            row_count=result["rowCount"],
         )
         return {"bucket": bucket, **result, "objectKey": object_key}
 

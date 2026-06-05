@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from time import perf_counter
 from typing import Callable
 
 from data_processing.contracts import PreviewResultPayload, ProcessResultPayload, SchemaItem
+from data_processing.services.observability import elapsed_ms, log_stage_event, stage_started
 
 from .csv_pipeline import fetch_csv_preview_page, process_staged_csv
 from .errors import ProcessingServiceError, ResourceLimitError, RESOURCE_LIMIT_MESSAGE
@@ -34,7 +34,7 @@ def process_s3_object(
     try:
         file_type = resolve_supported_file_type(object_key)
         client = build_s3_client(credentials)
-        started = perf_counter()
+        started = stage_started()
         if progress_callback is not None:
             progress_callback("staging_file", 10)
 
@@ -58,22 +58,21 @@ def process_s3_object(
                 progress_callback=progress_callback,
             )
 
-        duration_ms = round((perf_counter() - started) * 1000, 2)
+        duration_ms = elapsed_ms(started)
         result["processingMetadata"] = {
             "durationMs": duration_ms,
             "previewRowLimit": preview_row_limit,
             "chunkSize": CSV_CHUNK_SIZE if file_type == "csv" else None,
             "appliedOverrides": overrides or {},
         }
-        logger.info(
+        log_stage_event(
+            logger,
             "processing.pipeline.completed",
-            extra={
-                "bucket": credentials.bucket,
-                "object_key": object_key,
-                "file_type": file_type,
-                "duration_ms": duration_ms,
-                "row_count": result["rowCount"],
-            },
+            bucket=credentials.bucket,
+            object_key=object_key,
+            file_type=file_type,
+            row_count=result["rowCount"],
+            duration_ms=duration_ms,
         )
         if progress_callback is not None:
             progress_callback("completed", 100)
@@ -121,16 +120,15 @@ def fetch_s3_preview_page(
                 page_size=page_size,
                 preview_columns=preview_columns,
             )
-        logger.info(
+        log_stage_event(
+            logger,
             "processing.preview_page.completed",
-            extra={
-                "bucket": credentials.bucket,
-                "object_key": object_key,
-                "file_type": file_type,
-                "page": page,
-                "page_size": page_size,
-                "row_count": row_count,
-            },
+            bucket=credentials.bucket,
+            object_key=object_key,
+            file_type=file_type,
+            page=page,
+            page_size=page_size,
+            row_count=row_count,
         )
         return preview
     except MemoryError as exc:
@@ -151,7 +149,7 @@ def process_local_file(
         raise ProcessingServiceError(f"Local file '{path}' does not exist.")
 
     file_type = resolve_supported_file_type(path.name)
-    started = perf_counter()
+    started = stage_started()
 
     try:
         if file_type == "csv":
@@ -167,16 +165,20 @@ def process_local_file(
                 selected_sheet=selected_sheet,
             )
 
-        duration_ms = round((perf_counter() - started) * 1000, 2)
+        duration_ms = elapsed_ms(started)
         result["processingMetadata"] = {
             "durationMs": duration_ms,
             "previewRowLimit": preview_row_limit,
             "chunkSize": CSV_CHUNK_SIZE if file_type == "csv" else None,
             "appliedOverrides": overrides or {},
         }
-        logger.info(
+        log_stage_event(
+            logger,
             "processing.local.completed",
-            extra={"file_path": str(path), "file_type": file_type, "duration_ms": duration_ms, "row_count": result["rowCount"]},
+            file_path=str(path),
+            file_type=file_type,
+            row_count=result["rowCount"],
+            duration_ms=duration_ms,
         )
         return result
     except MemoryError as exc:

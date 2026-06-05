@@ -6,6 +6,11 @@ from django.utils import timezone
 
 from data_processing.contracts import ProcessResultPayload, SparkComparisonResultPayload
 from data_processing.models import ProcessingRun
+from data_processing.services.observability import log_stage_event
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 
 def mark_run_queued(run: ProcessingRun, *, task_id: str, engine: str = "pandas") -> ProcessingRun:
@@ -27,6 +32,15 @@ def mark_run_queued(run: ProcessingRun, *, task_id: str, engine: str = "pandas")
             "error_message",
         ]
     )
+    log_stage_event(
+        logger,
+        "processing.run.queued",
+        run_id=run.id,
+        task_id=task_id,
+        engine=engine,
+        object_key=run.object_key,
+        run_type=run.run_type,
+    )
     return run
 
 
@@ -44,6 +58,16 @@ def mark_run_processing(
     if run.started_at is None:
         run.started_at = timezone.now()
     run.save(update_fields=["status", "progress_stage", "progress_percent", "started_at"])
+    log_stage_event(
+        logger,
+        "processing.run.processing",
+        run_id=run.id,
+        task_id=run.task_id,
+        object_key=run.object_key,
+        run_type=run.run_type,
+        progress_stage=progress_stage,
+        progress_percent=progress_percent,
+    )
     return run
 
 
@@ -87,6 +111,16 @@ def mark_run_completed(run: ProcessingRun, result: ProcessResultPayload) -> Proc
             "completed_at",
         ]
     )
+    log_stage_event(
+        logger,
+        "processing.run.completed",
+        run_id=run.id,
+        task_id=run.task_id,
+        object_key=run.object_key,
+        run_type=run.run_type,
+        file_type=run.file_type,
+        row_count=run.row_count,
+    )
     return run
 
 
@@ -124,6 +158,16 @@ def mark_run_comparison_completed(run: ProcessingRun, result: SparkComparisonRes
             "completed_at",
         ]
     )
+    log_stage_event(
+        logger,
+        "processing.run.spark_completed",
+        run_id=run.id,
+        task_id=run.task_id,
+        object_key=run.object_key,
+        run_type=run.run_type,
+        file_type=run.file_type,
+        row_count=run.row_count,
+    )
     return run
 
 
@@ -137,4 +181,13 @@ def mark_run_failed(run: ProcessingRun, message: str) -> ProcessingRun:
     if run.completed_at is None:
         run.completed_at = timezone.now()
     run.save(update_fields=["status", "error_message", "progress_stage", "progress_percent", "completed_at"])
+    log_stage_event(
+        logger,
+        "processing.run.failed",
+        run_id=run.id,
+        task_id=run.task_id,
+        object_key=run.object_key,
+        run_type=run.run_type,
+        error_message=message,
+    )
     return run

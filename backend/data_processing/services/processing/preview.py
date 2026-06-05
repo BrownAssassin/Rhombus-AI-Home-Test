@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 import logging
-from time import perf_counter
 
 import pandas as pd
 
 from data_processing.contracts import PreviewPagePayload, PreviewResultPayload, PreviewRow, ProcessResultPayload, SchemaItem
+from data_processing.services.observability import elapsed_ms, log_stage_event, stage_started
 
 from data_processing.services.inference import (
     convert_dataframe,
@@ -132,21 +132,20 @@ def process_dataframe(
 ) -> ProcessResultPayload:
     """Process an in-memory dataframe and return schema plus preview payloads."""
 
-    started = perf_counter()
+    started = stage_started()
     profiles = create_profiles(df.columns)
     update_profiles_from_dataframe(profiles, df)
     schema, warnings = build_schema_from_profiles(profiles, overrides or {})
     preview_columns, preview_rows = convert_preview_slice(df, schema, limit=preview_row_limit)
     preview_page = build_preview_page_metadata(len(df), page=1, page_size=preview_row_limit)
-    logger.info(
+    log_stage_event(
+        logger,
         "processing.preview.process_dataframe.completed",
-        extra={
-            "object_key": object_key,
-            "file_type": file_type,
-            "row_count": len(df),
-            "preview_row_limit": preview_row_limit,
-            "duration_ms": round((perf_counter() - started) * 1000, 2),
-        },
+        object_key=object_key,
+        file_type=file_type,
+        row_count=len(df),
+        preview_row_limit=preview_row_limit,
+        duration_ms=elapsed_ms(started),
     )
 
     return {
@@ -174,7 +173,7 @@ def fetch_local_csv_preview_page(
 ) -> PreviewResultPayload:
     """Load one processed CSV preview page from a staged local file."""
 
-    started = perf_counter()
+    started = stage_started()
     preview_page = build_preview_page_metadata(row_count, page=page, page_size=page_size)
     page_columns = preview_columns or [item["column"] for item in schema]
     if row_count == 0:
@@ -191,15 +190,14 @@ def fetch_local_csv_preview_page(
         page=page,
         page_size=page_size,
     )
-    logger.info(
+    log_stage_event(
+        logger,
         "processing.preview.fetch_local_csv_preview_page.completed",
-        extra={
-            "file_path": str(file_path),
-            "page": page,
-            "page_size": page_size,
-            "row_count": row_count,
-            "duration_ms": round((perf_counter() - started) * 1000, 2),
-        },
+        file_path=str(file_path),
+        page=page,
+        page_size=page_size,
+        row_count=row_count,
+        duration_ms=elapsed_ms(started),
     )
     return {
         "previewColumns": page_columns or preview_columns or [item["column"] for item in schema],

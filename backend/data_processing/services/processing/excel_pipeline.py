@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from data_processing.contracts import PreviewResultPayload, ProcessResultPayload, SchemaItem
+from data_processing.services.observability import log_stage_event
 
 from .local_files import load_local_excel_dataframe
 from .preview import build_preview_page_metadata, convert_preview_slice, process_dataframe
@@ -46,9 +47,12 @@ def process_staged_excel(
             object_key=object_key,
             selected_sheet=selected_sheet,
         )
-        logger.info(
+        log_stage_event(
+            logger,
             "processing.excel.completed",
-            extra={"bucket": bucket, "object_key": object_key, "row_count": result["rowCount"]},
+            bucket=bucket,
+            object_key=object_key,
+            row_count=result["rowCount"],
         )
         return {"bucket": bucket, **result}
 

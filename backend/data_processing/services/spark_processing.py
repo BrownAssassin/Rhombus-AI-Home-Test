@@ -6,10 +6,10 @@ from contextlib import suppress
 from datetime import date, datetime
 from decimal import Decimal
 import logging
-from time import perf_counter
 from typing import Any
 
 from data_processing.contracts import PreviewRow, SparkComparisonResultPayload, SparkSchemaItem
+from data_processing.services.observability import elapsed_ms, log_stage_event, stage_started
 
 from .processing import (
     build_preview_page_metadata,
@@ -123,7 +123,7 @@ def run_spark_csv_comparison(
     spark = None
 
     try:
-        started = perf_counter()
+        started = stage_started()
         spark = _create_spark_session()
 
         with lease_staged_s3_object(client, credentials.bucket, object_key) as staged_file:
@@ -149,17 +149,16 @@ def run_spark_csv_comparison(
                     }
                 )
 
-        duration_ms = round((perf_counter() - started) * 1000, 2)
-        logger.info(
+        duration_ms = elapsed_ms(started)
+        log_stage_event(
+            logger,
             "processing.spark.completed",
-            extra={
-                "bucket": credentials.bucket,
-                "object_key": object_key,
-                "page": page,
-                "page_size": page_size,
-                "row_count": row_count,
-                "duration_ms": duration_ms,
-            },
+            bucket=credentials.bucket,
+            object_key=object_key,
+            page=page,
+            page_size=page_size,
+            row_count=row_count,
+            duration_ms=duration_ms,
         )
         return {
             "engine": "spark",

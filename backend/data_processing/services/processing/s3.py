@@ -6,12 +6,12 @@ from dataclasses import dataclass
 import logging
 from pathlib import Path
 import tempfile
-from time import perf_counter
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
 from data_processing.contracts import SupportedFilePayload
+from data_processing.services.observability import elapsed_ms, log_stage_event, stage_started
 
 from .errors import FileTooLargeError, InvalidCredentialsError, ProcessingServiceError, S3AccessError, UnsupportedFileTypeError
 
@@ -74,7 +74,7 @@ def list_supported_files(credentials: S3Credentials) -> list[SupportedFilePayloa
     client = build_s3_client(credentials)
     paginator = client.get_paginator("list_objects_v2")
     files: list[SupportedFilePayload] = []
-    started = perf_counter()
+    started = stage_started()
 
     try:
         pages = paginator.paginate(Bucket=credentials.bucket, Prefix=credentials.prefix or "")
@@ -98,14 +98,13 @@ def list_supported_files(credentials: S3Credentials) -> list[SupportedFilePayloa
         raise ProcessingServiceError("Unable to communicate with S3.") from exc
 
     sorted_files = sorted(files, key=lambda item: item["key"].lower())
-    logger.info(
+    log_stage_event(
+        logger,
         "processing.s3.list_supported_files.completed",
-        extra={
-            "bucket": credentials.bucket,
-            "prefix": credentials.prefix,
-            "file_count": len(sorted_files),
-            "duration_ms": round((perf_counter() - started) * 1000, 2),
-        },
+        bucket=credentials.bucket,
+        prefix=credentials.prefix,
+        file_count=len(sorted_files),
+        duration_ms=elapsed_ms(started),
     )
     return sorted_files
 
@@ -158,7 +157,7 @@ def download_object_to_temp_file(
     """Stage an S3 object to a local temp file for deterministic processing."""
 
     temp_file: tempfile.NamedTemporaryFile | None = None
-    started = perf_counter()
+    started = stage_started()
 
     def cleanup_temp_file() -> None:
         if temp_file is None:
@@ -180,14 +179,13 @@ def download_object_to_temp_file(
         temp_path = Path(temp_file.name)
         temp_file.close()
         temp_file = None
-        logger.info(
+        log_stage_event(
+            logger,
             "processing.s3.download_object_to_temp_file.completed",
-            extra={
-                "bucket": bucket,
-                "object_key": object_key,
-                "content_length": resolved_metadata.content_length,
-                "duration_ms": round((perf_counter() - started) * 1000, 2),
-            },
+            bucket=bucket,
+            object_key=object_key,
+            content_length=resolved_metadata.content_length,
+            duration_ms=elapsed_ms(started),
         )
         return temp_path, resolved_metadata.content_length
     except ClientError as exc:

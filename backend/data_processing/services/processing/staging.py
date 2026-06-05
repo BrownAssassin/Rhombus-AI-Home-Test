@@ -12,6 +12,7 @@ from pathlib import Path
 import threading
 import time
 
+from data_processing.services.observability import log_stage_event
 from .s3 import S3ObjectMetadata, download_object_to_temp_file, head_object_metadata
 
 
@@ -159,9 +160,12 @@ def get_staged_s3_object_path(
             object_key,
             metadata=metadata,
         )
-        logger.info(
+        log_stage_event(
+            logger,
             "processing.staging.downloaded_ephemeral",
-            extra={"bucket": bucket, "object_key": object_key, "content_length": metadata.content_length},
+            bucket=bucket,
+            object_key=object_key,
+            content_length=metadata.content_length,
         )
         return StagedFileLease(
             path=temp_path,
@@ -171,9 +175,12 @@ def get_staged_s3_object_path(
 
     cached_path = STAGED_FILE_CACHE.get(bucket, object_key, metadata=metadata)
     if cached_path is not None:
-        logger.info(
+        log_stage_event(
+            logger,
             "processing.staging.cache_hit",
-            extra={"bucket": bucket, "object_key": object_key, "content_length": metadata.content_length},
+            bucket=bucket,
+            object_key=object_key,
+            content_length=metadata.content_length,
         )
         return StagedFileLease(path=cached_path, content_length=metadata.content_length)
 
@@ -184,9 +191,12 @@ def get_staged_s3_object_path(
         metadata=metadata,
     )
     cached_path = STAGED_FILE_CACHE.put(bucket, object_key, metadata=metadata, path=temp_path)
-    logger.info(
+    log_stage_event(
+        logger,
         "processing.staging.cache_populated",
-        extra={"bucket": bucket, "object_key": object_key, "content_length": metadata.content_length},
+        bucket=bucket,
+        object_key=object_key,
+        content_length=metadata.content_length,
     )
     return StagedFileLease(path=cached_path, content_length=metadata.content_length)
 
