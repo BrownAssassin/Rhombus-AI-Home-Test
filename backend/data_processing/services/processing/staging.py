@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
+import logging
 import os
 from pathlib import Path
 import threading
@@ -14,6 +17,7 @@ from .s3 import S3ObjectMetadata, download_object_to_temp_file, head_object_meta
 
 STAGED_FILE_CACHE_MAX_ITEMS = max(0, int(os.getenv("STAGED_FILE_CACHE_MAX_ITEMS", "2")))
 STAGED_FILE_CACHE_TTL_SECONDS = max(0, int(os.getenv("STAGED_FILE_CACHE_TTL_SECONDS", "900")))
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -155,6 +159,10 @@ def get_staged_s3_object_path(
             object_key,
             metadata=metadata,
         )
+        logger.info(
+            "processing.staging.downloaded_ephemeral",
+            extra={"bucket": bucket, "object_key": object_key, "content_length": metadata.content_length},
+        )
         return StagedFileLease(
             path=temp_path,
             content_length=metadata.content_length,
@@ -163,6 +171,10 @@ def get_staged_s3_object_path(
 
     cached_path = STAGED_FILE_CACHE.get(bucket, object_key, metadata=metadata)
     if cached_path is not None:
+        logger.info(
+            "processing.staging.cache_hit",
+            extra={"bucket": bucket, "object_key": object_key, "content_length": metadata.content_length},
+        )
         return StagedFileLease(path=cached_path, content_length=metadata.content_length)
 
     temp_path, _ = download_object_to_temp_file(
@@ -172,6 +184,10 @@ def get_staged_s3_object_path(
         metadata=metadata,
     )
     cached_path = STAGED_FILE_CACHE.put(bucket, object_key, metadata=metadata, path=temp_path)
+    logger.info(
+        "processing.staging.cache_populated",
+        extra={"bucket": bucket, "object_key": object_key, "content_length": metadata.content_length},
+    )
     return StagedFileLease(path=cached_path, content_length=metadata.content_length)
 
 
@@ -180,3 +196,25 @@ def release_staged_file(lease: StagedFileLease) -> None:
 
     if lease.release_when_done:
         lease.path.unlink(missing_ok=True)
+
+
+@contextmanager
+def lease_staged_s3_object(
+    client,
+    bucket: str,
+    object_key: str,
+    *,
+    max_size_bytes: int | None = None,
+) -> Iterator[StagedFileLease]:
+    """Yield a staged-file lease and always release it with the public contract."""
+
+    lease = get_staged_s3_object_path(
+        client,
+        bucket,
+        object_key,
+        max_size_bytes=max_size_bytes,
+    )
+    try:
+        yield lease
+    finally:
+        release_staged_file(lease)
