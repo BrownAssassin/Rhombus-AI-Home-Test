@@ -7,6 +7,8 @@ from typing import Any
 
 import pandas as pd
 
+from data_processing.contracts import JSONValue, PreviewRow, SchemaItem
+
 from .constants import ALLOWED_OVERRIDE_TYPES, TYPE_DISPLAY_NAMES
 from .parsers import normalize_scalar, parse_bool_token, parse_datetime_series, parse_decimal
 from .profiles import ColumnProfile
@@ -32,9 +34,9 @@ def can_profile_convert_to(profile: ColumnProfile, target_type: str) -> bool:
 
 def validate_overrides(
     profiles: dict[str, ColumnProfile],
-    schema: list[dict[str, Any]],
+    schema: list[SchemaItem],
     overrides: dict[str, str],
-) -> list[dict[str, Any]]:
+) -> list[SchemaItem]:
     """Apply validated overrides to an inferred schema payload."""
 
     schema_by_column = {item["column"]: dict(item) for item in schema}
@@ -109,7 +111,7 @@ def convert_series(series: pd.Series, target_type: str) -> pd.Series:
     raise ValueError(f"Unsupported target type '{target_type}'.")
 
 
-def convert_dataframe(df: pd.DataFrame, schema: list[dict[str, Any]]) -> pd.DataFrame:
+def convert_dataframe(df: pd.DataFrame, schema: list[SchemaItem]) -> pd.DataFrame:
     """Convert a dataframe according to the inferred or overridden schema."""
 
     converted = pd.DataFrame(index=df.index)
@@ -119,7 +121,7 @@ def convert_dataframe(df: pd.DataFrame, schema: list[dict[str, Any]]) -> pd.Data
     return converted
 
 
-def serialize_scalar(value: Any, *, target_type: str | None = None) -> Any:
+def serialize_scalar(value: Any, *, target_type: str | None = None) -> JSONValue:
     """Serialize pandas and numpy scalars into JSON-friendly preview values."""
 
     if value is None or pd.isna(value):
@@ -142,8 +144,8 @@ def dataframe_preview(
     df: pd.DataFrame,
     limit: int,
     *,
-    schema: list[dict[str, Any]] | None = None,
-) -> tuple[list[str], list[dict[str, Any]]]:
+    schema: list[SchemaItem] | None = None,
+) -> tuple[list[str], list[PreviewRow]]:
     """Serialize the first preview rows for API responses and CLI output."""
 
     preview_df = df.head(limit)

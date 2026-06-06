@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Any, Iterable
+from typing import Iterable
 
 import pandas as pd
+
+from data_processing.contracts import SchemaItem
 
 from .parsers import (
     normalize_scalar,
@@ -65,7 +67,7 @@ class ColumnInference:
     sample_values: list[str]
     allowed_overrides: list[str]
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> SchemaItem:
         """Convert the dataclass to the API payload shape."""
 
         return asdict(self)

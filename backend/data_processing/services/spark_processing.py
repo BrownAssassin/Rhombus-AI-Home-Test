@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 from contextlib import suppress
-from time import perf_counter
+from datetime import date, datetime
+from decimal import Decimal
+import logging
 from typing import Any
 
+from data_processing.contracts import PreviewRow, SparkComparisonResultPayload, SparkSchemaItem
+from data_processing.services.observability import elapsed_ms, log_stage_event, stage_started
+
 from .processing import (
+    build_preview_page_metadata,
     InvalidPreviewPageError,
     ProcessingServiceError,
     S3Credentials,
     UnsupportedFileTypeError,
-    _build_preview_page_metadata,
-    _get_staged_s3_object_path,
-    _release_staged_file,
     build_s3_client,
+    lease_staged_s3_object,
     resolve_supported_file_type,
 )
 
@@ -24,6 +28,9 @@ class SparkUnavailableError(ProcessingServiceError):
 
     status_code = 503
     code = "spark_unavailable"
+
+
+logger = logging.getLogger(__name__)
 
 
 def _import_spark_session():
@@ -36,6 +43,24 @@ def _import_spark_session():
             "PySpark is not installed in this environment. Install the optional Spark dependencies first."
         ) from exc
     return SparkSession
+
+
+def _create_spark_session():
+    """Create the local Spark session with the service's default config."""
+
+    SparkSession = _import_spark_session()
+    try:
+        return (
+            SparkSession.builder.appName("rhombus-spark-comparison")
+            .master("local[*]")
+            .config("spark.ui.enabled", "false")
+            .config("spark.sql.session.timeZone", "UTC")
+            .getOrCreate()
+        )
+    except Exception as exc:  # pragma: no cover - depends on local Spark/Java runtime
+        raise SparkUnavailableError(
+            "PySpark could not start. Verify that Java is installed and the Spark runtime is available."
+        ) from exc
 
 
 def _map_spark_type(data_type_name: str) -> tuple[str, str]:
@@ -55,18 +80,30 @@ def _map_spark_type(data_type_name: str) -> tuple[str, str]:
     return "text", "Text"
 
 
-def _slice_spark_preview(raw_df, *, page: int, page_size: int) -> list[dict[str, Any]]:
+def _serialize_spark_value(value: Any) -> object:
+    """Normalize Spark-native values into JSON-safe primitives."""
+
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return str(value)
+    return str(value)
+
+
+def _slice_spark_preview(dataframe, *, page: int, page_size: int) -> list[PreviewRow]:
     """Collect just the requested preview slice from a Spark DataFrame."""
 
     start = (page - 1) * page_size
     end = start + page_size
     rows = (
-        raw_df.rdd.zipWithIndex()
+        dataframe.rdd.zipWithIndex()
         .filter(lambda item: start <= item[1] < end)
         .map(lambda item: item[0].asDict(recursive=True))
         .collect()
     )
-    return [dict(row) for row in rows]
+    return [{key: _serialize_spark_value(value) for key, value in row.items()} for row in rows]
 
 
 def run_spark_csv_comparison(
@@ -75,7 +112,7 @@ def run_spark_csv_comparison(
     object_key: str,
     page: int = 1,
     page_size: int = 100,
-) -> dict[str, Any]:
+) -> SparkComparisonResultPayload:
     """Stage a CSV locally, then compare its shape using a local Spark session."""
 
     file_type = resolve_supported_file_type(object_key)
@@ -83,53 +120,46 @@ def run_spark_csv_comparison(
         raise UnsupportedFileTypeError("Spark comparison currently supports CSV files only.")
 
     client = build_s3_client(credentials)
-    staged_file = _get_staged_s3_object_path(client, credentials.bucket, object_key)
-    SparkSession = _import_spark_session()
     spark = None
 
     try:
-        started = perf_counter()
-        try:
-            spark = (
-                SparkSession.builder.appName("rhombus-spark-comparison")
-                .master("local[*]")
-                .config("spark.ui.enabled", "false")
-                .config("spark.sql.session.timeZone", "UTC")
-                .getOrCreate()
-            )
-        except Exception as exc:  # pragma: no cover - depends on local Spark/Java runtime
-            raise SparkUnavailableError(
-                "PySpark could not start. Verify that Java is installed and the Spark runtime is available."
-            ) from exc
+        started = stage_started()
+        spark = _create_spark_session()
 
-        raw_df = (
-            spark.read.option("header", True)
-            .option("inferSchema", False)
-            .csv(str(staged_file.path))
-        )
-        schema_df = (
-            spark.read.option("header", True)
-            .option("inferSchema", True)
-            .csv(str(staged_file.path))
-        )
-        row_count = raw_df.count()
-        preview_page = _build_preview_page_metadata(row_count, page=page, page_size=page_size)
-        preview_columns = list(raw_df.columns)
-        preview_rows = _slice_spark_preview(raw_df, page=page, page_size=page_size)
-        spark_schema = []
-        for field in schema_df.schema.fields:
-            mapped_type, display_type = _map_spark_type(field.dataType.simpleString())
-            spark_schema.append(
-                {
-                    "column": field.name,
-                    "sparkType": field.dataType.simpleString(),
-                    "mappedType": mapped_type,
-                    "displayType": display_type,
-                    "nullable": field.nullable,
-                }
+        with lease_staged_s3_object(client, credentials.bucket, object_key) as staged_file:
+            dataframe = (
+                spark.read.option("header", True)
+                .option("inferSchema", True)
+                .csv(str(staged_file.path))
             )
+            row_count = dataframe.count()
+            preview_page = build_preview_page_metadata(row_count, page=page, page_size=page_size)
+            preview_columns = list(dataframe.columns)
+            preview_rows = _slice_spark_preview(dataframe, page=page, page_size=page_size)
+            spark_schema: list[SparkSchemaItem] = []
+            for field in dataframe.schema.fields:
+                mapped_type, display_type = _map_spark_type(field.dataType.simpleString())
+                spark_schema.append(
+                    {
+                        "column": field.name,
+                        "sparkType": field.dataType.simpleString(),
+                        "mappedType": mapped_type,
+                        "displayType": display_type,
+                        "nullable": field.nullable,
+                    }
+                )
 
-        duration_ms = round((perf_counter() - started) * 1000, 2)
+        duration_ms = elapsed_ms(started)
+        log_stage_event(
+            logger,
+            "processing.spark.completed",
+            bucket=credentials.bucket,
+            object_key=object_key,
+            page=page,
+            page_size=page_size,
+            row_count=row_count,
+            duration_ms=duration_ms,
+        )
         return {
             "engine": "spark",
             "fileType": file_type,
@@ -158,4 +188,3 @@ def run_spark_csv_comparison(
         if spark is not None:
             with suppress(Exception):
                 spark.stop()
-        _release_staged_file(staged_file)

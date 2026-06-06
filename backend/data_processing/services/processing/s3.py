@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 import tempfile
-from typing import Any
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
+
+from data_processing.contracts import SupportedFilePayload
+from data_processing.services.observability import elapsed_ms, log_stage_event, stage_started
 
 from .errors import FileTooLargeError, InvalidCredentialsError, ProcessingServiceError, S3AccessError, UnsupportedFileTypeError
 
@@ -19,6 +22,7 @@ SUPPORTED_EXTENSIONS = {
     ".xlsx": "excel",
 }
 MAX_EXCEL_SIZE_BYTES = 20 * 1024 * 1024
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -64,12 +68,13 @@ def map_client_error(exc: ClientError) -> ProcessingServiceError:
     return ProcessingServiceError(exc.response.get("Error", {}).get("Message", "An AWS error occurred."))
 
 
-def list_supported_files(credentials: S3Credentials) -> list[dict[str, Any]]:
+def list_supported_files(credentials: S3Credentials) -> list[SupportedFilePayload]:
     """List supported CSV and Excel objects for the selected bucket/prefix."""
 
     client = build_s3_client(credentials)
     paginator = client.get_paginator("list_objects_v2")
-    files: list[dict[str, Any]] = []
+    files: list[SupportedFilePayload] = []
+    started = stage_started()
 
     try:
         pages = paginator.paginate(Bucket=credentials.bucket, Prefix=credentials.prefix or "")
@@ -92,7 +97,16 @@ def list_supported_files(credentials: S3Credentials) -> list[dict[str, Any]]:
     except BotoCoreError as exc:
         raise ProcessingServiceError("Unable to communicate with S3.") from exc
 
-    return sorted(files, key=lambda item: item["key"].lower())
+    sorted_files = sorted(files, key=lambda item: item["key"].lower())
+    log_stage_event(
+        logger,
+        "processing.s3.list_supported_files.completed",
+        bucket=credentials.bucket,
+        prefix=credentials.prefix,
+        file_count=len(sorted_files),
+        duration_ms=elapsed_ms(started),
+    )
+    return sorted_files
 
 
 def resolve_supported_file_type(file_name: str) -> str:
@@ -143,6 +157,7 @@ def download_object_to_temp_file(
     """Stage an S3 object to a local temp file for deterministic processing."""
 
     temp_file: tempfile.NamedTemporaryFile | None = None
+    started = stage_started()
 
     def cleanup_temp_file() -> None:
         if temp_file is None:
@@ -164,6 +179,14 @@ def download_object_to_temp_file(
         temp_path = Path(temp_file.name)
         temp_file.close()
         temp_file = None
+        log_stage_event(
+            logger,
+            "processing.s3.download_object_to_temp_file.completed",
+            bucket=bucket,
+            object_key=object_key,
+            content_length=resolved_metadata.content_length,
+            duration_ms=elapsed_ms(started),
+        )
         return temp_path, resolved_metadata.content_length
     except ClientError as exc:
         cleanup_temp_file()

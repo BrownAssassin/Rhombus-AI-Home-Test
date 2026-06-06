@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from data_processing.contracts import PreviewContextPayload, PreviewRequestPayload, ProcessRequestPayload, ValidatedCredentialsPayload
 from data_processing.services.processing import S3Credentials
 
 
-def build_credentials(validated_data: dict) -> S3Credentials:
+def build_credentials(validated_data: ValidatedCredentialsPayload) -> S3Credentials:
     """Build service-layer credentials from validated request data."""
 
     return S3Credentials(
@@ -18,13 +19,13 @@ def build_credentials(validated_data: dict) -> S3Credentials:
     )
 
 
-def build_overrides(validated_data: dict) -> dict[str, str]:
+def build_overrides(validated_data: ProcessRequestPayload) -> dict[str, str]:
     """Flatten validated override rows into the service-layer mapping."""
 
     return {item["column"]: item["target_type"] for item in validated_data.get("overrides", [])}
 
 
-def build_preview_context(validated_data: dict) -> dict | None:
+def build_preview_context(validated_data: PreviewRequestPayload) -> PreviewContextPayload | None:
     """Reconstruct preview context when the saved run is unavailable."""
 
     required_fields = ("object_key", "file_type", "row_count", "schema")
