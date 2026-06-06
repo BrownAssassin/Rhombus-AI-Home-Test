@@ -7,6 +7,7 @@ afterEach(() => {
   cleanup();
   vi.useRealTimers();
   vi.restoreAllMocks();
+  window.localStorage.clear();
 });
 
 function enterRequiredCredentials() {
@@ -25,6 +26,16 @@ function getInspectorPanel() {
 
 function getResultsWorkspace() {
   return screen.getByLabelText(/Results workspace/i);
+}
+
+function openFilesAndJobsPanel() {
+  fireEvent.click(screen.getByRole("button", { name: /^Files & jobs$/i }));
+  return getFilesAndJobsPanel();
+}
+
+function openInspectorPanel() {
+  fireEvent.click(screen.getByRole("button", { name: /^Schema & tools$/i }));
+  return getInspectorPanel();
 }
 
 function jsonResponse(body: unknown, init?: Partial<Response>): Partial<Response> {
@@ -130,7 +141,8 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: /Browse files/i }));
 
     await waitFor(() => expect(screen.getByText("Processing workbench")).toBeInTheDocument());
-    expect(screen.getByRole("button", { name: /folder\/sample\.csv/i })).toBeInTheDocument();
+    expect(getFilesAndJobsPanel()).toBeInTheDocument();
+    expect(within(getFilesAndJobsPanel()).getByRole("button", { name: /folder\/sample\.csv/i })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /Edit connection/i }));
 
@@ -163,8 +175,10 @@ describe("App", () => {
     await waitFor(() => expect(screen.getByText("Processing workbench")).toBeInTheDocument());
 
     expect(within(getResultsWorkspace()).getByText("Ready to process")).toBeInTheDocument();
-    fireEvent.click(within(getResultsWorkspace()).getByRole("button", { name: /Process file/i }));
+    fireEvent.click(within(getFilesAndJobsPanel()).getByRole("button", { name: /^Process file$/i }));
 
+    await waitFor(() => expect(screen.getByText("Processed preview")).toBeInTheDocument());
+    openInspectorPanel();
     await waitFor(() => expect(screen.getByText("Review and refine")).toBeInTheDocument());
     expect(screen.getByRole("cell", { name: "Score" })).toBeInTheDocument();
     expect(screen.getByLabelText(/Override type for Score/i)).toHaveValue("float");
@@ -207,12 +221,16 @@ describe("App", () => {
     await waitFor(() => expect(screen.getByText("Processing workbench")).toBeInTheDocument());
 
     fireEvent.click(within(getFilesAndJobsPanel()).getByRole("button", { name: /Process file/i }));
+    openInspectorPanel();
     await waitFor(() => expect(screen.getByLabelText(/Override type for Score/i)).toHaveValue("float"));
 
     fireEvent.change(screen.getByLabelText(/Override type for Score/i), { target: { value: "text" } });
     expect(screen.getByLabelText(/Override type for Score/i)).toHaveValue("text");
 
+    openInspectorPanel();
     fireEvent.click(screen.getByRole("button", { name: /Reprocess with overrides/i }));
+    await waitFor(() => expect(screen.getByText(/Preview rows 1-2 of 2/i)).toBeInTheDocument());
+    openInspectorPanel();
     await waitFor(() => expect(screen.getByLabelText(/Override type for Score/i)).toHaveValue("text"));
     expect(screen.getByRole("cell", { name: "Float" })).toBeInTheDocument();
 
@@ -329,6 +347,7 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: /Next page/i }));
     await waitFor(() => expect(screen.getByText(/Page 2 of 2/i)).toBeInTheDocument());
 
+    openInspectorPanel();
     fireEvent.click(screen.getByRole("button", { name: /Reprocess with overrides/i }));
     await waitFor(() => expect(screen.getByText(/Preview rows 1-25 of 30/i)).toBeInTheDocument());
     expect(screen.getByText(/Page 1 of 2/i)).toBeInTheDocument();
@@ -361,7 +380,7 @@ describe("App", () => {
     expect(within(getFilesAndJobsPanel()).getByRole("button", { name: /Process file/i })).toBeDisabled();
   });
 
-  it("shows a clear ready state in the workspace and guidance in the inspector before processing", async () => {
+  it("opens and closes slide-over panels cleanly and keeps only one process action in the workbench", async () => {
     vi.stubGlobal(
       "fetch",
       vi
@@ -384,8 +403,24 @@ describe("App", () => {
     await waitFor(() => expect(screen.getByText("Processing workbench")).toBeInTheDocument());
 
     expect(within(getResultsWorkspace()).getByText("Ready to process")).toBeInTheDocument();
-    expect(within(getResultsWorkspace()).getByRole("button", { name: /Process file/i })).toBeInTheDocument();
+    expect(within(getResultsWorkspace()).getByRole("button", { name: /Open Files & jobs/i })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: /^Process file$/i })).toHaveLength(1);
+    expect(screen.getByRole("separator", { name: /Resize Files and jobs panel/i })).toBeInTheDocument();
+
+    fireEvent.click(within(getFilesAndJobsPanel()).getByRole("button", { name: /Close panel/i }));
+    await waitFor(() => expect(screen.queryByRole("complementary", { name: /Files and jobs/i })).not.toBeInTheDocument());
+
+    openInspectorPanel();
     expect(within(getInspectorPanel()).getByText(/Schema tools appear after processing/i)).toBeInTheDocument();
+    expect(screen.getByRole("separator", { name: /Resize Schema and comparison tools panel/i })).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() =>
+      expect(screen.queryByRole("complementary", { name: /Schema and comparison tools/i })).not.toBeInTheDocument(),
+    );
+
+    openFilesAndJobsPanel();
+    expect(getFilesAndJobsPanel()).toBeInTheDocument();
   });
 
   it("prefers async processing, shows recent jobs, and hydrates the preview on completion", async () => {
@@ -420,18 +455,9 @@ describe("App", () => {
         .mockResolvedValueOnce(jsonResponse({ runId: 7, taskId: "task-123", runType: "process", status: "queued", engine: "pandas" }))
         .mockResolvedValueOnce(
           jsonResponse({
-            runs: [
-              buildRecentRun({
-                runId: 7,
-                taskId: "task-123",
-                status: "queued",
-                progressStage: "queued",
-                progressPercent: 0,
-              }),
-            ],
+            runs: [],
           }),
         )
-        .mockResolvedValueOnce(jsonResponse({ runs: [buildRecentRun({ runId: 7 })] }))
         .mockResolvedValueOnce(jsonResponse(completedRun)),
     );
 
@@ -442,12 +468,15 @@ describe("App", () => {
     await waitFor(() => expect(screen.getByText("Processing workbench")).toBeInTheDocument());
 
     fireEvent.click(within(getFilesAndJobsPanel()).getByRole("button", { name: /Process file/i }));
+    await waitFor(() => expect(screen.getByText(/Processing sample\.csv/i)).toBeInTheDocument());
+
+    await waitFor(() => expect(screen.getByText(/Preview rows 1-2 of 2/i)).toBeInTheDocument(), { timeout: 4000 });
+    openFilesAndJobsPanel();
     await waitFor(() => expect(within(getFilesAndJobsPanel()).getByText("Recent runs")).toBeInTheDocument());
     expect(screen.getAllByText("sample.csv").length).toBeGreaterThan(0);
-
-    await waitFor(() => expect(screen.getByText(/Preview rows 1-2 of 2/i)).toBeInTheDocument());
-    expect(screen.getByRole("cell", { name: "Score" })).toBeInTheDocument();
-  });
+    expect(screen.getByRole("columnheader", { name: "Score" })).toBeInTheDocument();
+    expect(within(getFilesAndJobsPanel()).getByRole("button", { name: /Viewing result/i })).toBeInTheDocument();
+  }, 10000);
 
   it("runs the experimental Spark comparison from a completed CSV result and hides it for non-result contexts", async () => {
     const processResponse = buildProcessResponse({
@@ -521,41 +550,12 @@ describe("App", () => {
       )
       .mockResolvedValueOnce(
         jsonResponse({
-          runs: [
-            buildRecentRun({
-              runId: 9,
-              taskId: "spark-task-123",
-              runType: "spark_compare",
-              sourceRunId: 3,
-              status: "queued",
-              engine: "spark",
-              progressStage: "queued",
-              progressPercent: 0,
-            }),
-            buildRecentRun({ runId: 3 }),
-          ],
+          runs: [buildRecentRun({ runId: 3 })],
         }),
       )
-      .mockResolvedValueOnce(
-        jsonResponse({
-          runs: [
-            { ...buildRecentRun({ runId: 3 }) },
-            {
-              ...buildRecentRun({
-                runId: 9,
-                taskId: "spark-task-123",
-                runType: "spark_compare",
-                sourceRunId: 3,
-                status: "completed",
-                engine: "spark",
-                progressStage: "completed",
-                progressPercent: 100,
-              }),
-            },
-          ],
-        }),
-      )
-      .mockResolvedValueOnce(jsonResponse(sparkComparisonRun));
+      .mockResolvedValueOnce(jsonResponse(sparkComparisonRun))
+      .mockResolvedValueOnce(jsonResponse(sparkComparisonRun))
+      .mockResolvedValueOnce(jsonResponse({ runs: [] }));
 
     vi.stubGlobal("fetch", fetchMock);
 
@@ -568,12 +568,54 @@ describe("App", () => {
     fireEvent.click(within(getFilesAndJobsPanel()).getByRole("button", { name: /Process file/i }));
     await waitFor(() => expect(screen.getByText(/Preview rows 1-2 of 2/i)).toBeInTheDocument());
 
+    openInspectorPanel();
     fireEvent.click(within(getInspectorPanel()).getByRole("button", { name: /Compare with Spark \(experimental\)/i }));
-    await waitFor(() => expect(screen.getByText("Compare with Spark")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("Compare with Spark")).toBeInTheDocument(), { timeout: 4000 });
     expect(screen.getByText("Experimental comparison mode.")).toBeInTheDocument();
     expect(screen.getByText("Spark preview")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /workbook\.xlsx/i }));
+    openFilesAndJobsPanel();
+    fireEvent.click(within(getFilesAndJobsPanel()).getByRole("button", { name: /workbook\.xlsx/i }));
+    openInspectorPanel();
     expect(within(getInspectorPanel()).queryByRole("button", { name: /Compare with Spark \(experimental\)/i })).not.toBeInTheDocument();
+  }, 10000);
+
+  it("keeps the current preview visible while browsing other files before processing them", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(
+          jsonResponse({
+            files: [
+              { key: "sample.csv", size: 147, lastModified: "2026-04-03T00:00:00Z", format: "csv" },
+              { key: "other.csv", size: 256, lastModified: "2026-04-04T00:00:00Z", format: "csv" },
+            ],
+          }),
+        )
+        .mockResolvedValueOnce(jsonResponse({ runs: [] }))
+        .mockResolvedValueOnce(jsonResponse({ detail: "Queue unavailable", code: "task_queue_error" }, { ok: false, status: 503 }))
+        .mockResolvedValueOnce(jsonResponse(buildProcessResponse()))
+        .mockResolvedValueOnce(jsonResponse({ runs: [buildRecentRun()] }))
+        .mockResolvedValueOnce(jsonResponse({ runs: [] })),
+    );
+
+    render(<App />);
+
+    enterRequiredCredentials();
+    fireEvent.click(screen.getByRole("button", { name: /Browse files/i }));
+    await waitFor(() => expect(screen.getByText("Processing workbench")).toBeInTheDocument());
+
+    fireEvent.click(within(getFilesAndJobsPanel()).getByRole("button", { name: /Process file/i }));
+    await waitFor(() => expect(screen.getByText(/Preview rows 1-2 of 2/i)).toBeInTheDocument());
+
+    openFilesAndJobsPanel();
+    fireEvent.click(within(getFilesAndJobsPanel()).getByRole("button", { name: /other\.csv/i }));
+    fireEvent.click(within(getFilesAndJobsPanel()).getByRole("button", { name: /Close panel/i }));
+
+    expect(screen.getByText(/Viewing sample\.csv while browsing other\.csv/i)).toBeInTheDocument();
+    expect(screen.getByText(/Preview rows 1-2 of 2/i)).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Score" })).toBeInTheDocument();
+    expect(screen.queryByText("Ready to process")).not.toBeInTheDocument();
   });
 });

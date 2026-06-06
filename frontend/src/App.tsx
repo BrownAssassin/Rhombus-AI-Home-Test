@@ -1,4 +1,4 @@
-import { startTransition, useEffect, useState, type JSX } from "react";
+import { startTransition, useEffect, useRef, useState, type JSX } from "react";
 
 import {
   ApiError,
@@ -22,11 +22,24 @@ import type {
 
 type ViewState = "connection" | "workbench";
 type BusyState = "idle" | "listing" | "processing" | "queueing" | "paging" | "spark" | "loadingRun";
-type MobilePanel = "rail" | "inspector" | null;
+type WorkbenchPanel = "files" | "schema" | null;
 type InspectorMode = "schema" | "spark";
+type ResizingPanel = Exclude<WorkbenchPanel, null>;
+type ResultContext = {
+  objectKey: string;
+  selectedSheet: string;
+  fileType: "csv" | "excel";
+};
 
 const PAGE_SIZE_OPTIONS = [25, 50, 100] as const;
 const RECENT_RUN_LIMIT = 6;
+const DESKTOP_PANEL_BREAKPOINT = 960;
+const FILES_PANEL_STORAGE_KEY = "rhombus-workbench-files-panel-width";
+const SCHEMA_PANEL_STORAGE_KEY = "rhombus-workbench-schema-panel-width";
+const FILES_PANEL_DEFAULT_WIDTH = 512;
+const FILES_PANEL_MIN_WIDTH = 440;
+const FILES_PANEL_MAX_WIDTH = 640;
+const SCHEMA_PANEL_MIN_WIDTH = 860;
 
 const defaultCredentials: S3CredentialsInput = {
   access_key_id: "",
@@ -98,6 +111,96 @@ function formatFileTimestamp(timestamp: string | null): string {
 
 function formatJobMeta(run: RunSummary): string {
   return `${formatRunType(run.runType)} | ${run.engine} | ${formatRunMoment(run)}`;
+}
+
+function isDesktopViewport(): boolean {
+  if (typeof window === "undefined") {
+    return true;
+  }
+
+  return window.innerWidth > DESKTOP_PANEL_BREAKPOINT;
+}
+
+function clampFilesPanelWidth(width: number, viewportWidth: number): number {
+  const maxWidth = Math.min(FILES_PANEL_MAX_WIDTH, Math.max(FILES_PANEL_MIN_WIDTH, viewportWidth - 48));
+  return Math.min(Math.max(width, FILES_PANEL_MIN_WIDTH), maxWidth);
+}
+
+function clampSchemaPanelWidth(width: number, viewportWidth: number): number {
+  const maxWidth = Math.max(SCHEMA_PANEL_MIN_WIDTH, viewportWidth - 32);
+  return Math.min(Math.max(width, SCHEMA_PANEL_MIN_WIDTH), maxWidth);
+}
+
+function getStoredPanelWidth(storageKey: string): number | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  const rawValue = window.localStorage.getItem(storageKey);
+  if (!rawValue) {
+    return null;
+  }
+
+  const parsedValue = Number(rawValue);
+  return Number.isFinite(parsedValue) ? parsedValue : null;
+}
+
+function getDefaultSchemaPanelWidth(viewportWidth: number): number {
+  return clampSchemaPanelWidth(Math.round(viewportWidth * 0.95), viewportWidth);
+}
+
+function mergeFetchedRunsWithPending(
+  currentRuns: RunSummary[],
+  fetchedRuns: RunSummary[],
+  pendingRunIds: number[],
+  objectKeyFilter?: string,
+): RunSummary[] {
+  const pendingSet = new Set(pendingRunIds);
+  const preservedPendingRuns = currentRuns.filter(
+    (run) =>
+      pendingSet.has(run.runId) &&
+      isRunActive(run) &&
+      (!objectKeyFilter || run.objectKey === objectKeyFilter) &&
+      !fetchedRuns.some((candidate) => candidate.runId === run.runId),
+  );
+
+  return [...preservedPendingRuns, ...fetchedRuns.filter((run) => !preservedPendingRuns.some((candidate) => candidate.runId === run.runId))].slice(
+    0,
+    RECENT_RUN_LIMIT,
+  );
+}
+
+function buildRunSummaryFromStatus(run: RunStatusResponse): RunSummary {
+  return {
+    runId: run.runId,
+    taskId: run.taskId,
+    runType: run.runType,
+    sourceRunId: run.sourceRunId ?? null,
+    status: run.status,
+    engine: run.engine,
+    bucket: run.bucket,
+    objectKey: run.objectKey,
+    progressStage: run.progressStage,
+    progressPercent: run.progressPercent,
+    errorMessage: run.errorMessage,
+    createdAt: run.createdAt,
+    startedAt: run.startedAt ?? null,
+    completedAt: run.completedAt ?? null,
+    fileType: run.fileType,
+    selectedSheet: run.selectedSheet ?? "",
+  };
+}
+
+function buildResultContextFromRun(run: RunStatusResponse): ResultContext | null {
+  if (!run.fileType) {
+    return null;
+  }
+
+  return {
+    objectKey: run.objectKey,
+    selectedSheet: run.selectedSheet ?? "",
+    fileType: run.fileType,
+  };
 }
 
 function formatColumnWarnings(schema: ColumnInferenceResult[]): JSX.Element | null {
@@ -214,14 +317,16 @@ function buildEffectiveOverrides(
 }
 
 export default function App() {
+  const initialViewportWidth = typeof window === "undefined" ? 1440 : window.innerWidth;
   const [view, setView] = useState<ViewState>("connection");
-  const [activeMobilePanel, setActiveMobilePanel] = useState<MobilePanel>(null);
+  const [openPanel, setOpenPanel] = useState<WorkbenchPanel>(null);
   const [inspectorMode, setInspectorMode] = useState<InspectorMode>("schema");
   const [credentials, setCredentials] = useState<S3CredentialsInput>(defaultCredentials);
   const [files, setFiles] = useState<S3File[]>([]);
   const [selectedKey, setSelectedKey] = useState("");
   const [sheetName, setSheetName] = useState("");
   const [result, setResult] = useState<ProcessResponse | null>(null);
+  const [resultContext, setResultContext] = useState<ResultContext | null>(null);
   const [detectedSchema, setDetectedSchema] = useState<ColumnInferenceResult[]>([]);
   const [overrides, setOverrides] = useState<Record<string, string>>({});
   const [rowsPerPage, setRowsPerPage] = useState<number>(25);
@@ -229,15 +334,28 @@ export default function App() {
   const [busyState, setBusyState] = useState<BusyState>("idle");
   const [recentRuns, setRecentRuns] = useState<RunSummary[]>([]);
   const [pendingProcessRunId, setPendingProcessRunId] = useState<number | null>(null);
+  const [pendingProcessRun, setPendingProcessRun] = useState<RunSummary | null>(null);
   const [pendingSparkRunId, setPendingSparkRunId] = useState<number | null>(null);
+  const [pendingSparkRun, setPendingSparkRun] = useState<RunSummary | null>(null);
   const [selectedSparkRunId, setSelectedSparkRunId] = useState<number | null>(null);
   const [sparkComparison, setSparkComparison] = useState<SparkComparisonResponse | null>(null);
   const [error, setError] = useState("");
   const [fallbackNotice, setFallbackNotice] = useState("");
+  const [isDesktopPanels, setIsDesktopPanels] = useState<boolean>(isDesktopViewport);
+  const [filesPanelWidth, setFilesPanelWidth] = useState<number>(() => {
+    const storedWidth = getStoredPanelWidth(FILES_PANEL_STORAGE_KEY);
+    return clampFilesPanelWidth(storedWidth ?? FILES_PANEL_DEFAULT_WIDTH, initialViewportWidth);
+  });
+  const [schemaPanelWidth, setSchemaPanelWidth] = useState<number>(() => {
+    const storedWidth = getStoredPanelWidth(SCHEMA_PANEL_STORAGE_KEY);
+    return clampSchemaPanelWidth(storedWidth ?? getDefaultSchemaPanelWidth(initialViewportWidth), initialViewportWidth);
+  });
+  const [resizingPanel, setResizingPanel] = useState<ResizingPanel | null>(null);
+  const resizeStateRef = useRef<{ panel: ResizingPanel; startX: number; startWidth: number } | null>(null);
+  const recentRunsRef = useRef<RunSummary[]>([]);
 
   const selectedFile = files.find((item) => item.key === selectedKey) ?? null;
   const displayedSchema = detectedSchema.length > 0 ? detectedSchema : result?.schema ?? [];
-  const currentProcessRun = result ? recentRuns.find((run) => run.runId === result.runId) ?? null : null;
   const currentSparkRun = selectedSparkRunId ? recentRuns.find((run) => run.runId === selectedSparkRunId) ?? null : null;
   const previewRows = result?.previewRows ?? [];
   const activePage = result?.previewPage.page ?? currentPage;
@@ -258,18 +376,29 @@ export default function App() {
     (column) => (overrides[column.column] ?? column.inferred_type) !== column.inferred_type,
   ).length;
   const hasUnsavedOverrides = changedOverrideCount > 0;
-  const runIsActive = recentRuns.some(isRunActive);
-  const latestActiveRun = recentRuns.find(isRunActive) ?? null;
-  const activeFileRun = latestActiveRun?.objectKey === selectedKey ? latestActiveRun : null;
-  const showingPreviewForSelectedFile = Boolean(result) && (!currentProcessRun || currentProcessRun.objectKey === selectedKey);
-  const showProcessWorkspacePrompt = Boolean(selectedFile) && !result && !activeFileRun;
+  const activeTrackedRun =
+    (pendingProcessRun && isRunActive(pendingProcessRun) ? pendingProcessRun : null) ??
+    (pendingSparkRun && isRunActive(pendingSparkRun) ? pendingSparkRun : null) ??
+    recentRuns.find(isRunActive) ??
+    null;
+  const runIsActive = activeTrackedRun !== null;
+  const hasPendingRuns = pendingProcessRunId !== null || pendingSparkRunId !== null;
+  const viewingSelectedFileResult = Boolean(resultContext && selectedKey && resultContext.objectKey === selectedKey);
+  const showProcessWorkspacePrompt = Boolean(selectedFile) && !result && !activeTrackedRun;
   const canCompareWithSpark = result?.fileType === "csv";
   const selectedFileSummary = selectedFile
     ? `${formatFileFormat(selectedFile)} | ${formatBytes(selectedFile.size)} | Updated ${formatFileTimestamp(selectedFile.lastModified)}`
-    : "Choose a file from the left rail to start processing.";
-  const activeRunStatusSummary = activeFileRun
-    ? `${formatRunType(activeFileRun.runType)} for ${activeFileRun.objectKey} is ${activeFileRun.progressStage || activeFileRun.status}.`
+    : "Open Files & jobs to choose a file and start processing.";
+  const activeRunStatusSummary = activeTrackedRun
+    ? `${formatRunType(activeTrackedRun.runType)} for ${activeTrackedRun.objectKey} is ${activeTrackedRun.progressStage || activeTrackedRun.status}.`
     : "";
+  const workspaceSummary = resultContext
+    ? selectedFile && !viewingSelectedFileResult
+      ? `Viewing ${resultContext.objectKey} while browsing ${selectedFile.key}. The preview only changes when a completed run is loaded.`
+      : `Viewing ${resultContext.objectKey}. The preview stays here until another completed run replaces it.`
+    : selectedFile
+      ? `Working with ${selectedFile.key}. Results and pagination stay here once processing completes.`
+      : "Open Files & jobs to choose a supported dataset and start building a preview.";
   const busyMessage = {
     idle: "",
     listing: "Loading supported files from S3...",
@@ -279,6 +408,115 @@ export default function App() {
     spark: "Queueing the experimental Spark comparison...",
     loadingRun: "Loading the selected run result...",
   }[busyState];
+
+  useEffect(() => {
+    recentRunsRef.current = recentRuns;
+  }, [recentRuns]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return undefined;
+    }
+
+    const syncPanelViewportState = () => {
+      const viewportWidth = window.innerWidth;
+      const desktop = viewportWidth > DESKTOP_PANEL_BREAKPOINT;
+      setIsDesktopPanels(desktop);
+      if (!desktop) {
+        return;
+      }
+
+      setFilesPanelWidth((current) => clampFilesPanelWidth(current, viewportWidth));
+      setSchemaPanelWidth((current) => clampSchemaPanelWidth(current, viewportWidth));
+    };
+
+    syncPanelViewportState();
+    window.addEventListener("resize", syncPanelViewportState);
+
+    return () => {
+      window.removeEventListener("resize", syncPanelViewportState);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!openPanel) {
+      document.body.style.overflow = "";
+      return undefined;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpenPanel(null);
+      }
+    };
+
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      document.body.style.overflow = "";
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [openPanel]);
+
+  useEffect(() => {
+    if (!isDesktopPanels || typeof window === "undefined") {
+      return;
+    }
+
+    window.localStorage.setItem(FILES_PANEL_STORAGE_KEY, String(filesPanelWidth));
+  }, [filesPanelWidth, isDesktopPanels]);
+
+  useEffect(() => {
+    if (!isDesktopPanels || typeof window === "undefined") {
+      return;
+    }
+
+    window.localStorage.setItem(SCHEMA_PANEL_STORAGE_KEY, String(schemaPanelWidth));
+  }, [isDesktopPanels, schemaPanelWidth]);
+
+  useEffect(() => {
+    if (!resizingPanel || !isDesktopPanels) {
+      return undefined;
+    }
+
+    const previousUserSelect = document.body.style.userSelect;
+    const previousCursor = document.body.style.cursor;
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const resizeState = resizeStateRef.current;
+      if (!resizeState) {
+        return;
+      }
+
+      const viewportWidth = window.innerWidth;
+      const deltaX = event.clientX - resizeState.startX;
+
+      if (resizeState.panel === "files") {
+        setFilesPanelWidth(clampFilesPanelWidth(resizeState.startWidth + deltaX, viewportWidth));
+        return;
+      }
+
+      setSchemaPanelWidth(clampSchemaPanelWidth(resizeState.startWidth - deltaX, viewportWidth));
+    };
+
+    const handlePointerUp = () => {
+      resizeStateRef.current = null;
+      setResizingPanel(null);
+    };
+
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "ew-resize";
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+
+    return () => {
+      document.body.style.userSelect = previousUserSelect;
+      document.body.style.cursor = previousCursor;
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+    };
+  }, [isDesktopPanels, resizingPanel]);
 
   useEffect(() => {
     if (view !== "workbench" || !selectedKey) {
@@ -292,7 +530,14 @@ export default function App() {
       try {
         const nextRuns = await fetchRecentRuns({ objectKey: selectedKey, limit: RECENT_RUN_LIMIT });
         if (!isCancelled) {
-          setRecentRuns(nextRuns);
+          setRecentRuns((current) =>
+            mergeFetchedRunsWithPending(
+              current,
+              nextRuns,
+              [pendingProcessRunId, pendingSparkRunId].filter((runId): runId is number => runId !== null),
+              selectedKey,
+            ),
+          );
         }
       } catch (caughtError) {
         if (!isCancelled) {
@@ -309,7 +554,7 @@ export default function App() {
   }, [selectedKey, view]);
 
   useEffect(() => {
-    if (view !== "workbench" || !selectedKey || !runIsActive) {
+    if (view !== "workbench" || !hasPendingRuns) {
       return undefined;
     }
 
@@ -317,42 +562,92 @@ export default function App() {
     let timeoutId: number | undefined;
 
     const pollRuns = async () => {
-      let nextRuns: RunSummary[] = [];
+      let shouldContinuePolling = false;
+      let shouldUseShortInterval = false;
 
       try {
-        nextRuns = await fetchRecentRuns({ objectKey: selectedKey, limit: RECENT_RUN_LIMIT });
-        if (isCancelled) {
-          return;
+        if (selectedKey) {
+          const nextRuns = await fetchRecentRuns({ objectKey: selectedKey, limit: RECENT_RUN_LIMIT });
+          if (isCancelled) {
+            return;
+          }
+
+          setRecentRuns((current) =>
+            mergeFetchedRunsWithPending(
+              current,
+              nextRuns,
+              [pendingProcessRunId, pendingSparkRunId].filter((runId): runId is number => runId !== null),
+              selectedKey,
+            ),
+          );
         }
 
-        setRecentRuns(nextRuns);
-
         if (pendingProcessRunId !== null) {
-          const pendingRun = nextRuns.find((run) => run.runId === pendingProcessRunId);
-          if (pendingRun?.status === "completed") {
-            const nextResult = await loadCompletedProcessRun(pendingRun.runId);
-            if (isCancelled) {
-              return;
+          const pendingRunStatus = await fetchRunStatus(pendingProcessRunId);
+          if (isCancelled) {
+            return;
+          }
+
+          const pendingRun = buildRunSummaryFromStatus(pendingRunStatus);
+          setPendingProcessRun(pendingRun);
+          if (pendingRun.objectKey === selectedKey) {
+            setRecentRuns((current) => [pendingRun, ...current.filter((run) => run.runId !== pendingRun.runId)].slice(0, RECENT_RUN_LIMIT));
+          }
+
+          if (isRunActive(pendingRun)) {
+            shouldContinuePolling = true;
+            shouldUseShortInterval = pendingRun.status === "queued";
+          } else if (pendingRunStatus.status === "completed") {
+            const nextResult = buildProcessResponseFromRun(pendingRunStatus);
+            const nextContext = buildResultContextFromRun(pendingRunStatus);
+            if (!nextResult || !nextContext) {
+              shouldContinuePolling = true;
+              shouldUseShortInterval = true;
+              setError("Unable to load the completed processing result yet.");
+            } else {
+              applyProcessResult(nextResult, nextResult.processingMetadata.appliedOverrides ?? {}, nextContext);
+              setPendingProcessRunId(null);
+              setPendingProcessRun(null);
             }
-            applyProcessResult(nextResult, nextResult.processingMetadata.appliedOverrides ?? {});
-            setPendingProcessRunId(null);
-          } else if (pendingRun?.status === "failed") {
+          } else if (pendingRun.status === "failed") {
             setError(pendingRun.errorMessage || "The background processing job failed.");
             setPendingProcessRunId(null);
+            setPendingProcessRun(null);
           }
         }
 
         if (pendingSparkRunId !== null) {
-          const pendingRun = nextRuns.find((run) => run.runId === pendingSparkRunId);
-          if (pendingRun?.status === "completed") {
-            await loadSparkComparisonRun(pendingRun.runId, pendingRun.sourceRunId);
-            if (isCancelled) {
-              return;
+          const pendingRunStatus = await fetchRunStatus(pendingSparkRunId);
+          if (isCancelled) {
+            return;
+          }
+
+          const pendingRun = buildRunSummaryFromStatus(pendingRunStatus);
+          setPendingSparkRun(pendingRun);
+          if (pendingRun.objectKey === selectedKey) {
+            setRecentRuns((current) => [pendingRun, ...current.filter((run) => run.runId !== pendingRun.runId)].slice(0, RECENT_RUN_LIMIT));
+          }
+
+          if (isRunActive(pendingRun)) {
+            shouldContinuePolling = true;
+            shouldUseShortInterval = shouldUseShortInterval || pendingRun.status === "queued";
+          } else if (pendingRunStatus.status === "completed") {
+            try {
+              await loadSparkComparisonRun(pendingRun.runId, pendingRun.sourceRunId);
+              if (isCancelled) {
+                return;
+              }
+              setPendingSparkRunId(null);
+              setPendingSparkRun(null);
+            } catch (caughtError) {
+              shouldContinuePolling = true;
+              shouldUseShortInterval = true;
+              setError(caughtError instanceof Error ? caughtError.message : "Unable to load the completed Spark comparison yet.");
             }
-            setPendingSparkRunId(null);
-          } else if (pendingRun?.status === "failed") {
+          } else if (pendingRun.status === "failed") {
             setError(pendingRun.errorMessage || "The Spark comparison job failed.");
             setPendingSparkRunId(null);
+            setPendingSparkRun(null);
           }
         }
       } catch (caughtError) {
@@ -360,8 +655,8 @@ export default function App() {
           setError(caughtError instanceof Error ? caughtError.message : "Unable to refresh the recent job list.");
         }
       } finally {
-        if (!isCancelled && nextRuns.some(isRunActive)) {
-          const nextInterval = nextRuns.some((run) => run.status === "queued") ? 1200 : 2500;
+        if (!isCancelled && shouldContinuePolling) {
+          const nextInterval = shouldUseShortInterval ? 1200 : 2500;
           timeoutId = window.setTimeout(() => {
             void pollRuns();
           }, nextInterval);
@@ -377,10 +672,11 @@ export default function App() {
         window.clearTimeout(timeoutId);
       }
     };
-  }, [pendingProcessRunId, pendingSparkRunId, runIsActive, selectedKey, view]);
+  }, [hasPendingRuns, pendingProcessRunId, pendingSparkRunId, selectedKey, view]);
 
-  function applyProcessResult(nextResult: ProcessResponse, appliedOverrides: Record<string, string>) {
+  function applyProcessResult(nextResult: ProcessResponse, appliedOverrides: Record<string, string>, context: ResultContext) {
     setResult(nextResult);
+    setResultContext(context);
     setCurrentPage(nextResult.previewPage.page);
     setRowsPerPage(nextResult.previewPage.pageSize);
     setDetectedSchema(nextResult.schema);
@@ -395,12 +691,15 @@ export default function App() {
 
   function resetWorkbenchState() {
     setResult(null);
+    setResultContext(null);
     setDetectedSchema([]);
     setOverrides({});
     setCurrentPage(1);
     setRecentRuns([]);
     setPendingProcessRunId(null);
+    setPendingProcessRun(null);
     setPendingSparkRunId(null);
+    setPendingSparkRun(null);
     setSelectedSparkRunId(null);
     setSparkComparison(null);
     setInspectorMode("schema");
@@ -418,6 +717,19 @@ export default function App() {
 
   function upsertQueuedRun(queuedRun: RunSummary) {
     setRecentRuns((current) => [queuedRun, ...current.filter((run) => run.runId !== queuedRun.runId)].slice(0, RECENT_RUN_LIMIT));
+  }
+
+  function beginPanelResize(panel: ResizingPanel, clientX: number) {
+    if (!isDesktopPanels) {
+      return;
+    }
+
+    resizeStateRef.current = {
+      panel,
+      startX: clientX,
+      startWidth: panel === "files" ? filesPanelWidth : schemaPanelWidth,
+    };
+    setResizingPanel(panel);
   }
 
   async function handleBrowseFiles() {
@@ -443,6 +755,7 @@ export default function App() {
         setSheetName("");
       }
       setView("workbench");
+      setOpenPanel("files");
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "Unable to load files.");
     } finally {
@@ -458,8 +771,14 @@ export default function App() {
 
     try {
       const nextRuns = await fetchRecentRuns({ objectKey: selectedKey, limit: RECENT_RUN_LIMIT });
-      setRecentRuns(nextRuns);
-      return nextRuns;
+      const mergedRuns = mergeFetchedRunsWithPending(
+        recentRunsRef.current,
+        nextRuns,
+        [pendingProcessRunId, pendingSparkRunId].filter((runId): runId is number => runId !== null),
+        selectedKey,
+      );
+      setRecentRuns(mergedRuns);
+      return mergedRuns;
     } catch (caughtError) {
       if (!suppressErrors) {
         setError(caughtError instanceof Error ? caughtError.message : "Unable to refresh the recent job list.");
@@ -468,13 +787,14 @@ export default function App() {
     }
   }
 
-  async function loadCompletedProcessRun(runId: number): Promise<ProcessResponse> {
+  async function loadCompletedProcessRun(runId: number): Promise<{ result: ProcessResponse; context: ResultContext }> {
     const run = await fetchRunStatus(runId);
     const nextResult = buildProcessResponseFromRun(run);
-    if (!nextResult) {
+    const nextContext = buildResultContextFromRun(run);
+    if (!nextResult || !nextContext) {
       throw new Error("The selected run is not a completed Pandas processing result.");
     }
-    return nextResult;
+    return { result: nextResult, context: nextContext };
   }
 
   async function loadSparkComparisonRun(runId: number, sourceRunId?: number | null): Promise<SparkComparisonResponse> {
@@ -486,7 +806,11 @@ export default function App() {
     const comparisonSourceRunId = comparisonRun.sourceRunId ?? sourceRunId ?? null;
     if (comparisonSourceRunId && result?.runId !== comparisonSourceRunId) {
       const sourceResult = await loadCompletedProcessRun(comparisonSourceRunId);
-      applyProcessResult(sourceResult, sourceResult.processingMetadata.appliedOverrides ?? {});
+      applyProcessResult(
+        sourceResult.result,
+        sourceResult.result.processingMetadata.appliedOverrides ?? {},
+        sourceResult.context,
+      );
     }
 
     setInspectorMode("spark");
@@ -507,8 +831,13 @@ export default function App() {
         overrides: Object.entries(appliedOverrideMap).map(([column, target_type]) => ({ column, target_type })),
       });
 
-      applyProcessResult(nextResult, appliedOverrideMap);
+      applyProcessResult(nextResult, appliedOverrideMap, {
+        objectKey: selectedKey,
+        selectedSheet: nextResult.selectedSheet,
+        fileType: nextResult.fileType,
+      });
       setPendingProcessRunId(null);
+      setPendingProcessRun(null);
       await refreshRecentRuns(true);
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "Unable to process file.");
@@ -530,7 +859,7 @@ export default function App() {
     setBusyState("queueing");
     setError("");
     setFallbackNotice("");
-    setActiveMobilePanel(null);
+    setOpenPanel(null);
     setSelectedSparkRunId(null);
     setSparkComparison(null);
     setInspectorMode("schema");
@@ -546,17 +875,16 @@ export default function App() {
         overrides: effectiveOverrides,
       });
 
+      const queuedSummary = buildQueuedRunSummary({
+        ...queuedRun,
+        bucket: credentials.bucket,
+        objectKey: selectedKey,
+        fileType: selectedFile?.format,
+        selectedSheet: sheetName,
+      });
       setPendingProcessRunId(queuedRun.runId);
-      upsertQueuedRun(
-        buildQueuedRunSummary({
-          ...queuedRun,
-          bucket: credentials.bucket,
-          objectKey: selectedKey,
-          fileType: selectedFile?.format,
-          selectedSheet: sheetName,
-        }),
-      );
-      await refreshRecentRuns(true);
+      setPendingProcessRun(queuedSummary);
+      upsertQueuedRun(queuedSummary);
     } catch (caughtError) {
       if (caughtError instanceof ApiError && (caughtError.code === "task_queue_error" || caughtError.status === 503)) {
         setFallbackNotice("Background queueing was unavailable, so the app processed this file inline instead.");
@@ -593,17 +921,16 @@ export default function App() {
         page: activePage,
         pageSize: rowsPerPage,
       });
+      const queuedSummary = buildQueuedRunSummary({
+        ...queuedRun,
+        bucket: credentials.bucket,
+        objectKey: resultContext?.objectKey ?? selectedKey,
+        fileType: result.fileType,
+        selectedSheet: result.selectedSheet,
+      });
       setPendingSparkRunId(queuedRun.runId);
-      upsertQueuedRun(
-        buildQueuedRunSummary({
-          ...queuedRun,
-          bucket: credentials.bucket,
-          objectKey: selectedKey,
-          fileType: result.fileType,
-          selectedSheet: result.selectedSheet,
-        }),
-      );
-      await refreshRecentRuns(true);
+      setPendingSparkRun(queuedSummary);
+      upsertQueuedRun(queuedSummary);
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "Unable to queue the Spark comparison.");
     } finally {
@@ -612,7 +939,7 @@ export default function App() {
   }
 
   async function handleLoadPreviewPage(nextPage: number, nextPageSize: number = rowsPerPage) {
-    if (!result || !selectedKey) {
+    if (!result || !resultContext) {
       return;
     }
 
@@ -623,9 +950,9 @@ export default function App() {
       const preview = await fetchPreviewPage({
         credentials,
         runId: result.runId,
-        objectKey: selectedKey,
+        objectKey: resultContext.objectKey,
         fileType: result.fileType,
-        selectedSheet: result.selectedSheet,
+        selectedSheet: resultContext.selectedSheet,
         rowCount: result.rowCount,
         schema: result.schema,
         previewColumns: result.previewColumns,
@@ -659,8 +986,12 @@ export default function App() {
 
     try {
       const nextResult = await loadCompletedProcessRun(runId);
-      applyProcessResult(nextResult, nextResult.processingMetadata.appliedOverrides ?? {});
-      setActiveMobilePanel(null);
+      applyProcessResult(
+        nextResult.result,
+        nextResult.result.processingMetadata.appliedOverrides ?? {},
+        nextResult.context,
+      );
+      setOpenPanel(null);
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "Unable to load the selected run result.");
     } finally {
@@ -674,7 +1005,7 @@ export default function App() {
 
     try {
       await loadSparkComparisonRun(runId, sourceRunId);
-      setActiveMobilePanel("inspector");
+      setOpenPanel("schema");
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "Unable to load the selected Spark comparison.");
     } finally {
@@ -688,8 +1019,6 @@ export default function App() {
 
   function handleSelectFile(file: S3File) {
     setSelectedKey(file.key);
-    resetWorkbenchState();
-    setActiveMobilePanel(null);
     if (file.format !== "excel") {
       setSheetName("");
     }
@@ -699,7 +1028,7 @@ export default function App() {
   }
 
   function handleEditConnection() {
-    setActiveMobilePanel(null);
+    setOpenPanel(null);
     setView("connection");
     if (error) {
       setError("");
@@ -839,13 +1168,13 @@ export default function App() {
               <div className="workbench-summary">
                 <span>{files.length} supported files</span>
                 <span>{selectedFile?.key ?? "No file selected"}</span>
-                {activeFileRun ? <span className="summary-chip-live">Processing in background</span> : null}
+                {activeTrackedRun ? <span className="summary-chip-live">Processing in background</span> : null}
               </div>
               <div className="workbench-header-buttons">
-                <button className="secondary-button mobile-panel-button" onClick={() => setActiveMobilePanel("rail")}>
+                <button className="secondary-button panel-toggle-button" onClick={() => setOpenPanel("files")}>
                   Files & jobs
                 </button>
-                <button className="secondary-button mobile-panel-button" onClick={() => setActiveMobilePanel("inspector")}>
+                <button className="secondary-button panel-toggle-button" onClick={() => setOpenPanel("schema")}>
                   Schema & tools
                 </button>
                 <button className="secondary-button" onClick={handleEditConnection}>
@@ -857,27 +1186,35 @@ export default function App() {
 
           {error ? <div className="callout danger">{error}</div> : null}
 
-          <section className="workbench-grid">
-            {activeMobilePanel ? (
-              <button
-                className="workbench-panel-backdrop"
-                aria-label="Close workbench side panel"
-                onClick={() => setActiveMobilePanel(null)}
-              />
+          <section className="workbench-shell">
+            {openPanel ? (
+              <button className="workbench-panel-backdrop" aria-label="Close workbench side panel" onClick={() => setOpenPanel(null)} />
             ) : null}
 
             <aside
-              className={`card workbench-panel workbench-rail ${
-                activeMobilePanel === "rail" ? "workbench-panel-open" : ""
-              }`}
+              className={`card workbench-panel workbench-panel-left ${openPanel === "files" ? "workbench-panel-open" : ""}`}
               aria-label="Files and jobs"
+              aria-hidden={openPanel !== "files"}
+              style={isDesktopPanels ? { width: `${filesPanelWidth}px` } : undefined}
             >
+              {isDesktopPanels ? (
+                <div
+                  className={`panel-resize-handle panel-resize-handle-left ${resizingPanel === "files" ? "is-resizing" : ""}`}
+                  role="separator"
+                  aria-label="Resize Files and jobs panel"
+                  aria-orientation="vertical"
+                  onPointerDown={(event) => {
+                    event.preventDefault();
+                    beginPanelResize("files", event.clientX);
+                  }}
+                />
+              ) : null}
               <div className="panel-header">
                 <div>
                   <p className="section-label">File selection + jobs</p>
                   <h2>Choose a file</h2>
                 </div>
-                <button className="secondary-button panel-close-button" onClick={() => setActiveMobilePanel(null)}>
+                <button className="secondary-button panel-close-button" onClick={() => setOpenPanel(null)}>
                   Close panel
                 </button>
               </div>
@@ -958,19 +1295,19 @@ export default function App() {
                 ) : null}
               </section>
 
-              {activeFileRun ? (
+              {activeTrackedRun ? (
                 <section className="rail-section active-job-panel">
                   <div className="rail-section-header">
                     <div>
                       <p className="section-label">Active job</p>
-                      <h3>{activeFileRun.objectKey}</h3>
+                      <h3>{activeTrackedRun.objectKey}</h3>
                     </div>
-                    <span className={`job-status job-status-${activeFileRun.status}`}>{activeFileRun.status}</span>
+                    <span className={`job-status job-status-${activeTrackedRun.status}`}>{activeTrackedRun.status}</span>
                   </div>
-                  <p className="job-meta">{formatJobMeta(activeFileRun)}</p>
+                  <p className="job-meta">{formatJobMeta(activeTrackedRun)}</p>
                   <div className="job-progress-row">
-                    <span>{activeFileRun.progressStage || activeFileRun.status}</span>
-                    <strong>{activeFileRun.progressPercent}%</strong>
+                    <span>{activeTrackedRun.progressStage || activeTrackedRun.status}</span>
+                    <strong>{activeTrackedRun.progressPercent}%</strong>
                   </div>
                   <LoadingNotice message={activeRunStatusSummary} />
                 </section>
@@ -991,23 +1328,28 @@ export default function App() {
                       const canRetry = run.runType === "process" && run.status === "failed" && run.objectKey === selectedKey;
                       const canViewResult = run.runType === "process" && run.status === "completed";
                       const canViewComparison = run.runType === "spark_compare" && run.status === "completed";
+                      const shouldShowProgress = isRunActive(run) || run.status === "failed";
 
                       return (
                         <article
                           key={run.runId}
-                          className={`job-card ${isCurrentResult || isCurrentComparison ? "job-card-current" : ""}`}
+                          className={`job-card ${isCurrentResult || isCurrentComparison ? "job-card-current" : ""} ${
+                            isRunActive(run) ? "job-card-live" : ""
+                          }`}
                         >
                           <div className="job-card-header">
-                            <div>
+                            <div className="job-card-copy">
                               <p className="job-title">{run.objectKey}</p>
                               <p className="job-meta">{formatJobMeta(run)}</p>
                             </div>
                             <span className={`job-status job-status-${run.status}`}>{run.status}</span>
                           </div>
-                          <div className="job-progress-row">
-                            <span>{run.progressStage || run.status}</span>
-                            <strong>{run.progressPercent}%</strong>
-                          </div>
+                          {shouldShowProgress ? (
+                            <div className="job-progress-row">
+                              <span>{run.progressStage || run.status}</span>
+                              <strong>{run.progressPercent}%</strong>
+                            </div>
+                          ) : null}
                           {run.errorMessage ? <p className="job-error">{run.errorMessage}</p> : null}
                           <div className="job-actions">
                             {canViewResult ? (
@@ -1056,14 +1398,10 @@ export default function App() {
                   <div>
                     <p className="section-label">Results workspace</p>
                     <h2>Processed preview</h2>
-                    <p className="helper-text">
-                      {selectedFile
-                        ? `Working with ${selectedFile.key}. Results and pagination stay here once processing completes.`
-                        : "Choose a supported file from the left rail to start building a preview."}
-                    </p>
+                    <p className="helper-text">{workspaceSummary}</p>
                   </div>
                   <div className="workspace-header-actions">
-                    {activeFileRun ? <span className="status-chip status-chip-live">Processing in background</span> : null}
+                    {activeTrackedRun ? <span className="status-chip status-chip-live">Processing in background</span> : null}
                     {result ? (
                       <label className="pagination-select">
                         Rows per page
@@ -1088,18 +1426,20 @@ export default function App() {
 
                 {busyState === "paging" || busyState === "loadingRun" ? <LoadingNotice message={busyMessage} /> : null}
 
-                {activeFileRun ? (
+                {activeTrackedRun ? (
                   <section className="workspace-status">
                     <div className="workspace-status-header">
-                      <strong>Processing {activeFileRun.objectKey}</strong>
+                      <strong>Processing {activeTrackedRun.objectKey}</strong>
                       <span>
-                        {activeFileRun.progressStage || activeFileRun.status} | {activeFileRun.progressPercent}%
+                        {activeTrackedRun.progressStage || activeTrackedRun.status} | {activeTrackedRun.progressPercent}%
                       </span>
                     </div>
                     <p>
-                      {showingPreviewForSelectedFile
+                      {result && resultContext && activeTrackedRun.runType === "process" && resultContext.objectKey === activeTrackedRun.objectKey
                         ? "Your last completed preview stays visible while the new run finishes."
-                        : "The first preview and schema will appear here automatically when the run completes."}
+                        : result
+                          ? "Your current preview stays visible while the background job finishes. The workspace will update automatically when the new run completes."
+                          : "The first preview and schema will appear here automatically when the run completes."}
                     </p>
                   </section>
                 ) : null}
@@ -1108,24 +1448,23 @@ export default function App() {
                   <div className="empty-state workspace-empty-state">
                     <h3>Choose a file to begin</h3>
                     <p>
-                      Select a supported CSV or Excel file from the left rail. The schema inspector and preview will
+                      Open Files & jobs to choose a supported CSV or Excel file. The schema inspector and preview will
                       update automatically after processing.
                     </p>
+                    <button className="secondary-button workspace-open-button" onClick={() => setOpenPanel("files")}>
+                      Open Files & jobs
+                    </button>
                   </div>
                 ) : showProcessWorkspacePrompt ? (
                   <div className="empty-state workspace-empty-state ready-state">
                     <p className="section-label">Ready to process</p>
                     <h3>{selectedFile.key}</h3>
                     <p>{selectedFileSummary}</p>
-                    <button
-                      className="primary-button"
-                      onClick={handleProcessFile}
-                      disabled={busyState !== "idle" || runIsActive}
-                    >
-                      Process file
+                    <button className="secondary-button workspace-open-button" onClick={() => setOpenPanel("files")}>
+                      Open Files & jobs
                     </button>
                     <p className="helper-text">
-                      Run the selected file to infer its schema, build the first preview page, and unlock override
+                      Use the control panel to run the selected file, build the first preview page, and unlock override
                       controls.
                     </p>
                   </div>
@@ -1199,32 +1538,46 @@ export default function App() {
                 ) : (
                   <div className="empty-state workspace-empty-state">
                     <h3>Waiting for results</h3>
-                    <p>Process the selected file to load its preview here and reveal the schema tools in the inspector.</p>
+                    <p>Open Files & jobs to process the selected file and reveal the schema tools in the inspector.</p>
                   </div>
                 )}
               </article>
             </section>
 
             <aside
-              className={`card workbench-panel workbench-inspector ${
-                activeMobilePanel === "inspector" ? "workbench-panel-open" : ""
-              }`}
+              className={`card workbench-panel workbench-panel-right ${openPanel === "schema" ? "workbench-panel-open" : ""}`}
               aria-label="Schema and comparison tools"
+              aria-hidden={openPanel !== "schema"}
+              style={isDesktopPanels ? { width: `${schemaPanelWidth}px` } : undefined}
             >
-              <div className="panel-header">
-                <div>
-                  <p className="section-label">Schema + comparison</p>
-                  <h2>Review and refine</h2>
+              {isDesktopPanels ? (
+                <div
+                  className={`panel-resize-handle panel-resize-handle-right ${resizingPanel === "schema" ? "is-resizing" : ""}`}
+                  role="separator"
+                  aria-label="Resize Schema and comparison tools panel"
+                  aria-orientation="vertical"
+                  onPointerDown={(event) => {
+                    event.preventDefault();
+                    beginPanelResize("schema", event.clientX);
+                  }}
+                />
+              ) : null}
+                <div className="panel-header">
+                  <div className="panel-header-title">
+                    <p className="section-label">Schema + comparison</p>
+                    <h2>Review and refine</h2>
+                  </div>
+                  <div className="panel-header-actions">
+                    <button className="secondary-button panel-close-button" onClick={() => setOpenPanel(null)}>
+                      Close panel
+                    </button>
+                  </div>
                 </div>
-                <button className="secondary-button panel-close-button" onClick={() => setActiveMobilePanel(null)}>
-                  Close panel
-                </button>
-              </div>
 
               {!selectedFile ? (
                 <div className="empty-state inspector-empty-state">
                   <h3>Select a file first</h3>
-                  <p>Choose a file from the left rail to unlock schema review and optional Spark comparison tools.</p>
+                  <p>Open Files & jobs, choose a file, and then process it to unlock schema review and optional Spark comparison tools.</p>
                 </div>
               ) : !result ? (
                 <div className="empty-state inspector-empty-state">
@@ -1250,12 +1603,32 @@ export default function App() {
                         >
                           Spark comparison
                         </button>
-                      ) : null}
+                        ) : null}
+                      </div>
+                      <div className="inspector-header-actions">
+                        {result && inspectorMode === "schema" && canCompareWithSpark ? (
+                          <section className="advanced-section advanced-section-inline">
+                            <div>
+                              <p className="section-label">Experimental</p>
+                              <h3>Compare engines</h3>
+                            </div>
+                            <div className="advanced-actions">
+                              <button
+                                className="secondary-button"
+                                onClick={handleRunSparkComparison}
+                                disabled={busyState !== "idle" || runIsActive}
+                              >
+                                {pendingSparkRunId !== null ? "Queueing comparison..." : "Compare with Spark (experimental)"}
+                              </button>
+                            </div>
+                            <p className="helper-text">Run Spark on this completed CSV without replacing the current Pandas result.</p>
+                          </section>
+                        ) : null}
+                        {hasUnsavedOverrides ? <span className="status-chip status-chip-warning">Overrides changed</span> : null}
+                      </div>
                     </div>
-                    {hasUnsavedOverrides ? <span className="status-chip status-chip-warning">Overrides changed</span> : null}
-                  </div>
 
-                  {inspectorMode === "spark" && sparkComparison ? (
+                    {inspectorMode === "spark" && sparkComparison ? (
                     <section className="comparison-panel">
                       <div className="card-header compact">
                         <div>
@@ -1350,39 +1723,41 @@ export default function App() {
                       </div>
                     </section>
                   ) : (
-                    <>
-                      <section className="schema-overview">
-                        <div className="metrics-row">
-                          <div className="metric">
-                            <span className="metric-label">Rows profiled</span>
-                            <strong>{result.rowCount.toLocaleString()}</strong>
+                    <div className="schema-workspace">
+                      <div className="schema-topbar">
+                        <section className="schema-overview">
+                          <div className="metrics-row">
+                            <div className="metric">
+                              <span className="metric-label">Rows profiled</span>
+                              <strong>{result.rowCount.toLocaleString()}</strong>
+                            </div>
+                            <div className="metric">
+                              <span className="metric-label">Processed in</span>
+                              <strong>{result.processingMetadata.durationMs} ms</strong>
+                            </div>
+                            <div className="metric">
+                              <span className="metric-label">Run ID</span>
+                              <strong>{result.runId}</strong>
+                            </div>
+                            <div className="metric">
+                              <span className="metric-label">Changed overrides</span>
+                              <strong>{changedOverrideCount}</strong>
+                            </div>
                           </div>
-                          <div className="metric">
-                            <span className="metric-label">Processed in</span>
-                            <strong>{result.processingMetadata.durationMs} ms</strong>
-                          </div>
-                          <div className="metric">
-                            <span className="metric-label">Run ID</span>
-                            <strong>{result.runId}</strong>
-                          </div>
-                          <div className="metric">
-                            <span className="metric-label">Changed overrides</span>
-                            <strong>{changedOverrideCount}</strong>
-                          </div>
-                        </div>
-                      </section>
+                        </section>
 
-                      <div className="inspector-toolbar">
-                        <button
-                          className="secondary-button"
-                          onClick={applySchemaDefaults}
-                          disabled={busyState === "processing" || busyState === "queueing" || displayedSchema.length === 0}
-                        >
-                          Reset overrides
-                        </button>
-                        <button className="secondary-button" onClick={handleProcessFile} disabled={busyState !== "idle" || runIsActive}>
-                          Reprocess with overrides
-                        </button>
+                        <div className="inspector-toolbar">
+                          <button
+                            className="secondary-button"
+                            onClick={applySchemaDefaults}
+                            disabled={busyState === "processing" || busyState === "queueing" || displayedSchema.length === 0}
+                          >
+                            Reset overrides
+                          </button>
+                          <button className="secondary-button" onClick={handleProcessFile} disabled={busyState !== "idle" || runIsActive}>
+                            Reprocess with overrides
+                          </button>
+                        </div>
                       </div>
 
                       <div className="table-wrap schema-table-wrap">
@@ -1427,29 +1802,7 @@ export default function App() {
                           </tbody>
                         </table>
                       </div>
-
-                      {canCompareWithSpark ? (
-                        <section className="advanced-section">
-                          <div>
-                            <p className="section-label">Experimental</p>
-                            <h3>Compare engines</h3>
-                          </div>
-                          <div className="advanced-actions">
-                            <button
-                              className="secondary-button"
-                              onClick={handleRunSparkComparison}
-                              disabled={busyState !== "idle" || runIsActive}
-                            >
-                              {pendingSparkRunId !== null ? "Queueing comparison..." : "Compare with Spark (experimental)"}
-                            </button>
-                          </div>
-                          <p className="helper-text">
-                            Compare this completed CSV run with Spark to inspect runtime, row counts, and Spark-native
-                            schema mapping without replacing the current Pandas workflow.
-                          </p>
-                        </section>
-                      ) : null}
-                    </>
+                    </div>
                   )}
                 </>
               )}

@@ -1,6 +1,8 @@
 services:
   web:
-    build: .
+    build:
+      context: .
+      target: web-runtime
     command: python docker/start.py
     ports:
       - "8000:8000"
@@ -19,7 +21,9 @@ services:
       - redis
 
   worker:
-    build: .
+    build:
+      context: .
+      target: worker-runtime
     command: celery -A rhombus_home_test worker --loglevel=info --concurrency=2
     env_file:
       - .env.example
@@ -40,3 +44,4 @@ services:
 
 volumes:
   app_data:
+    name: rhombus-ai-home-test_app_data
