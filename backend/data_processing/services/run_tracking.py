@@ -1,60 +1,90 @@
-"""Helpers for persisting and serializing processing-run lifecycle state."""
+"""Helpers for persisting tracked processing-run lifecycle state."""
 
 from __future__ import annotations
-
-from typing import Any
 
 from django.utils import timezone
 
 from data_processing.models import ProcessingRun
 
 
-def _serialize_common_run_fields(run: ProcessingRun) -> dict[str, Any]:
-    """Return lifecycle fields shared by process and comparison runs."""
+def get_run(run_id: int) -> ProcessingRun | None:
+    """Return one tracked run by id or None when it no longer exists."""
 
-    return {
-        "runId": run.id,
-        "taskId": run.task_id,
-        "runType": run.run_type,
-        "sourceRunId": run.source_run_id,
-        "status": run.status,
-        "engine": run.engine,
-        "bucket": run.bucket,
-        "objectKey": run.object_key,
-        "progressStage": run.progress_stage,
-        "progressPercent": run.progress_percent,
-        "errorMessage": run.error_message,
-        "createdAt": run.created_at.isoformat(),
-        "startedAt": run.started_at.isoformat() if run.started_at else None,
-        "completedAt": run.completed_at.isoformat() if run.completed_at else None,
-        "fileType": run.file_type,
-        "selectedSheet": run.sheet_name,
-    }
+    return ProcessingRun.objects.filter(pk=run_id).first()
 
 
-def serialize_run(run: ProcessingRun, *, include_payload: bool = True) -> dict[str, Any]:
-    """Return the stable API payload for one tracked processing run."""
+def list_runs(*, object_key: str | None = None, limit: int = 10):
+    """Return recent runs ordered newest-first with an optional file filter."""
 
-    payload = _serialize_common_run_fields(run)
-    if not include_payload or run.status != "completed":
-        return payload
+    runs = ProcessingRun.objects.all()
+    if object_key is not None:
+        runs = runs.filter(object_key=object_key)
+    return runs[:limit]
 
-    if run.run_type == "spark_compare":
-        payload["sparkComparison"] = run.comparison_payload
-        return payload
 
-    payload.update(
-        {
-            "rowCount": run.row_count,
-            "schema": run.schema,
-            "previewColumns": run.preview_columns,
-            "previewRows": run.preview_rows,
-            "previewPage": run.preview_page,
-            "warnings": run.warnings,
-            "processingMetadata": run.processing_metadata,
-        }
+def create_completed_process_run(result: dict[str, Any]) -> ProcessingRun:
+    """Persist the synchronous process response as a completed tracked run."""
+
+    now = timezone.now()
+    return ProcessingRun.objects.create(
+        bucket=result["bucket"],
+        object_key=result["objectKey"],
+        file_type=result["fileType"],
+        sheet_name=result["selectedSheet"],
+        run_type="process",
+        status="completed",
+        engine="pandas",
+        progress_stage="completed",
+        progress_percent=100,
+        row_count=result["rowCount"],
+        schema=result["schema"],
+        warnings=result["warnings"],
+        preview_columns=result["previewColumns"],
+        preview_rows=result["previewRows"],
+        preview_page=result["previewPage"],
+        processing_metadata=result["processingMetadata"],
+        started_at=now,
+        completed_at=now,
     )
-    return payload
+
+
+def create_queued_process_run(
+    *,
+    bucket: str,
+    object_key: str,
+    file_type: str,
+    sheet_name: str = "",
+) -> ProcessingRun:
+    """Create a queued Pandas processing run before Celery picks it up."""
+
+    return ProcessingRun.objects.create(
+        bucket=bucket,
+        object_key=object_key,
+        file_type=file_type,
+        sheet_name=sheet_name,
+        run_type="process",
+        status="queued",
+        engine="pandas",
+        progress_stage="queued",
+        progress_percent=0,
+    )
+
+
+def create_queued_spark_comparison_run(source_run: ProcessingRun) -> ProcessingRun:
+    """Create a queued Spark comparison run linked to its source process run."""
+
+    return ProcessingRun.objects.create(
+        bucket=source_run.bucket,
+        object_key=source_run.object_key,
+        file_type=source_run.file_type,
+        sheet_name=source_run.sheet_name,
+        run_type="spark_compare",
+        source_run=source_run,
+        status="queued",
+        engine="spark",
+        progress_stage="queued",
+        progress_percent=0,
+    )
 
 
 def mark_run_queued(run: ProcessingRun, *, task_id: str, engine: str = "pandas") -> ProcessingRun:
@@ -182,7 +212,8 @@ def mark_run_failed(run: ProcessingRun, message: str) -> ProcessingRun:
     run.status = "failed"
     run.error_message = message
     run.progress_stage = "failed"
+    run.progress_percent = 100
     if run.completed_at is None:
         run.completed_at = timezone.now()
-    run.save(update_fields=["status", "error_message", "progress_stage", "completed_at"])
+    run.save(update_fields=["status", "error_message", "progress_stage", "progress_percent", "completed_at"])
     return run
