@@ -17,6 +17,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+RUN groupadd --system appuser \
+    && useradd --system --gid appuser --create-home --home-dir /home/appuser appuser \
+    && mkdir -p /app/data /app/backend/static \
+    && chown -R appuser:appuser /app /home/appuser
+
 FROM python-base AS worker-runtime
 
 ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
@@ -27,7 +32,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir -r requirements.worker.txt
 
-COPY backend ./backend
+COPY --chown=appuser:appuser backend ./backend
+USER appuser
 CMD ["celery", "-A", "rhombus_home_test", "worker", "--loglevel=info", "--concurrency=2"]
 
 
@@ -36,10 +42,11 @@ FROM python-base AS web-runtime
 COPY requirements.base.txt requirements.web.txt ./
 RUN pip install --no-cache-dir -r requirements.web.txt
 
-COPY backend ./backend
-COPY docker/start.py ./docker/start.py
-COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
+COPY --chown=appuser:appuser backend ./backend
+COPY --chown=appuser:appuser docker/start.py ./docker/start.py
+COPY --from=frontend-builder --chown=appuser:appuser /app/frontend/dist ./frontend/dist
 
+USER appuser
 RUN python backend/manage.py collectstatic --noinput
 
 EXPOSE 8000

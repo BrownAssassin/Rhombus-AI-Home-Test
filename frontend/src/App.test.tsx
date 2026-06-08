@@ -221,6 +221,7 @@ describe("App", () => {
     await waitFor(() => expect(screen.getByText("Processing workbench")).toBeInTheDocument());
 
     fireEvent.click(within(getFilesAndJobsPanel()).getByRole("button", { name: /Process file/i }));
+    await waitFor(() => expect(screen.getByText(/Preview rows 1-2 of 2/i)).toBeInTheDocument());
     openInspectorPanel();
     await waitFor(() => expect(screen.getByLabelText(/Override type for Score/i)).toHaveValue("float"));
 
