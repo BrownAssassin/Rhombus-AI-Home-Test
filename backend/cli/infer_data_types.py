@@ -6,9 +6,8 @@ import argparse
 from pathlib import Path
 import sys
 
-REPO_ROOT = Path(__file__).resolve().parent
-# The shared services live in the Django app package under ./backend.
-sys.path.insert(0, str(REPO_ROOT / "backend"))
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(BACKEND_DIR))
 
 from data_processing.services.processing import ProcessingServiceError, process_local_file
 

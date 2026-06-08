@@ -23,7 +23,7 @@ Public deployment: `https://rhombus-ai-home-test.onrender.com/`
 - Prefers background processing jobs through Celery and Redis while the workbench keeps the last successful preview visible and polls recent run status updates.
 - Offers an experimental PySpark comparison mode for completed CSV Pandas runs so users can compare runtime, row counts, schema mapping, and preview output.
 - Stores sanitized processing metadata in Django without persisting AWS secrets.
-- Exposes a local CLI via `infer_data_types.py` for quick local-file smoke testing.
+- Exposes a local CLI via `backend/cli/infer_data_types.py` for quick local-file smoke testing.
 
 ## Inference and performance approach
 
@@ -49,7 +49,8 @@ Public deployment: `https://rhombus-ai-home-test.onrender.com/`
 - `frontend/`: React + TypeScript frontend
 - `docs/brief/`: assignment brief and supporting project notes
 - `examples/`: sample datasets for local smoke testing
-- `infer_data_types.py`: local CLI wrapper around the shared processing service
+- `backend/manage.py`: Django management entrypoint for local backend commands
+- `backend/cli/`: local CLI wrappers around the shared processing services
 - `Dockerfile`: production-oriented Docker build with a lean web default target plus a Spark-capable worker target
 - `docker-compose.yml`: local async development stack for Django, Celery, and Redis
 
@@ -100,7 +101,7 @@ cd ..
 ### 3. Apply migrations
 
 ```powershell
-python manage.py migrate
+python backend/manage.py migrate
 ```
 
 ### 4. Optional: start Redis and a Celery worker for the async path
@@ -127,7 +128,7 @@ Build the frontend once, then let Django serve it:
 cd frontend
 npm run build
 cd ..
-python manage.py runserver
+python backend/manage.py runserver
 ```
 
 Open `http://127.0.0.1:8000`.
@@ -153,7 +154,7 @@ The Compose setup mounts a shared SQLite volume for both `web` and `worker` so b
 Run Django for the API:
 
 ```powershell
-python manage.py runserver
+python backend/manage.py runserver
 ```
 
 In a second terminal, run Vite for the frontend:
@@ -197,13 +198,13 @@ See `.env.example` for a starter local or container configuration.
 The local CLI uses the same inference service as the web application:
 
 ```powershell
-python infer_data_types.py examples/sample_data.csv --preview-rows 5
+python backend/cli/infer_data_types.py examples/sample_data.csv --preview-rows 5
 ```
 
 Optional Excel sheet selection:
 
 ```powershell
-python infer_data_types.py path\to\workbook.xlsx --sheet-name Sheet1
+python backend/cli/infer_data_types.py path\to\workbook.xlsx --sheet-name Sheet1
 ```
 
 ## API summary
@@ -380,8 +381,8 @@ That keeps Redis focused on transient queueing and task state, while Django rema
 Backend:
 
 ```powershell
-python manage.py test
-python manage.py check
+python backend/manage.py test
+python backend/manage.py check
 ```
 
 Frontend:
@@ -395,7 +396,7 @@ npm run build
 CLI smoke test:
 
 ```powershell
-python infer_data_types.py examples/sample_data.csv --preview-rows 5
+python backend/cli/infer_data_types.py examples/sample_data.csv --preview-rows 5
 ```
 
 ## Docker verification
