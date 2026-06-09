@@ -1,16 +1,16 @@
 #!/usr/bin/env python
 """Project management entrypoint for Django commands."""
 
+from __future__ import annotations
+
 import os
-from pathlib import Path
 import sys
 
 
 def main() -> None:
-    """Execute Django management commands with the backend package on sys.path."""
+    """Execute Django management commands for the backend project."""
 
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "rhombus_home_test.settings")
-    sys.path.insert(0, str(Path(__file__).resolve().parent / "backend"))
     from django.core.management import execute_from_command_line
 
     execute_from_command_line(sys.argv)

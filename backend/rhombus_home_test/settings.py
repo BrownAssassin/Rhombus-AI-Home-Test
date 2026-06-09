@@ -98,7 +98,7 @@ ASGI_APPLICATION = "rhombus_home_test.asgi.application"
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
-        "NAME": Path(os.getenv("DJANGO_SQLITE_PATH", REPO_ROOT / "db.sqlite3")),
+        "NAME": Path(os.getenv("DJANGO_SQLITE_PATH", BASE_DIR / "db.sqlite3")),
     }
 }
 
