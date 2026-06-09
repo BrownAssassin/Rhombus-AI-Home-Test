@@ -8,14 +8,15 @@
 [![Live App](https://img.shields.io/badge/Live%20App-Render-46E3B7)](https://rhombus-ai-home-test.onrender.com/)
 [![License: Unlicense](https://img.shields.io/badge/License-Unlicense-lightgrey)](LICENSE)
 [![Repo Size](https://img.shields.io/github/repo-size/BrownAssassin/Rhombus-AI-Home-Test)](https://github.com/BrownAssassin/Rhombus-AI-Home-Test)
+[![Last Commit](https://img.shields.io/github/last-commit/BrownAssassin/Rhombus-AI-Home-Test)](https://github.com/BrownAssassin/Rhombus-AI-Home-Test/commits/main)
 
-Single-host Django + React application for browsing CSV and Excel files in Amazon S3, inferring Pandas data types, previewing processed data with override controls, and tracking async processing runs. The workbench also includes an experimental PySpark comparison mode for completed CSV runs.
+Single-host Django + React workbench for browsing CSV and Excel files in Amazon S3, inferring Pandas data types, previewing processed data with override controls, and tracking async processing runs. The app also includes an experimental PySpark comparison mode for completed CSV runs.
 
 Public deployment: `https://rhombus-ai-home-test.onrender.com/`
 
 ## Overview
 
-The app is built around one primary workflow:
+The workbench is built around one primary workflow:
 
 1. connect to an S3 bucket with runtime AWS credentials
 2. browse supported CSV and Excel objects
@@ -24,7 +25,29 @@ The app is built around one primary workflow:
 5. optionally override types and reprocess
 6. optionally compare a completed CSV result against Spark
 
-The frontend keeps the current processed preview stable while users browse files or wait for background work to finish, and the backend stores sanitized run metadata without persisting AWS secrets.
+The frontend keeps the current processed preview stable while users browse files or wait for background work to finish, and the backend stores sanitized run metadata without persisting AWS secrets. That makes the app practical to operate as a small deployed product while still reading clearly as a portfolio-style showcase of async workflow design, inference UX, and backend architecture discipline.
+
+## Screenshots
+
+**Connection hero:** S3 connection setup with runtime credentials kept out of local storage.
+
+![Connection hero](docs/screenshots/v2/01-connection-hero.png)
+
+**Workbench ready:** The workbench after browsing supported S3 files and selecting a dataset to process.
+
+![Workbench ready](docs/screenshots/v2/02-workbench-ready.png)
+
+**Processed preview:** Processed preview with paginated results that stay visible while users browse other files or wait for background work.
+
+![Processed preview](docs/screenshots/v2/03-processed-preview.png)
+
+**Schema overrides:** Schema review and manual override controls before reprocessing the selected dataset.
+
+![Schema overrides](docs/screenshots/v2/04-schema-overrides.png)
+
+**Spark comparison:** Experimental Spark comparison for a completed CSV Pandas run, including runtime and schema mapping.
+
+![Spark comparison](docs/screenshots/v2/05-spark-comparison.png)
 
 ## Core capabilities
 
@@ -175,7 +198,10 @@ Supported backend/runtime configuration includes:
 - `DJANGO_CSRF_TRUSTED_ORIGINS`
 - `DJANGO_SQLITE_PATH`
 - `DJANGO_FRONTEND_BUILD_DIR`
+- `DJANGO_LOG_LEVEL`
+- `DATA_PROCESSING_LOG_LEVEL`
 - `WEB_CONCURRENCY`
+- `GUNICORN_THREADS`
 - `GUNICORN_TIMEOUT`
 - `CSV_CHUNK_SIZE`
 - `STAGED_FILE_CACHE_MAX_ITEMS`
@@ -260,12 +286,12 @@ http://127.0.0.1:8000/api/health/
 
 ## Render deployment
 
-Render remains the recommended public host for this repository’s single-host deployment shape.
+Render remains the recommended public host for this repository's single-host deployment shape.
 
 For a standard web deployment:
 
 1. create a Render Web Service
-2. point it at this repository’s `main` branch
+2. point it at this repository's `main` branch
 3. choose `Docker` as the runtime
 4. use `/api/health/` as the health check path
 5. deploy the default lean web target from [`Dockerfile`](Dockerfile)
@@ -276,10 +302,13 @@ Recommended Render settings include:
 - `DJANGO_DEBUG=False`
 - optional `DJANGO_SQLITE_PATH=/app/data/db.sqlite3` if you later attach persistent storage
 - `WEB_CONCURRENCY=1`
+- `GUNICORN_THREADS=1`
 - `GUNICORN_TIMEOUT=180`
+- optional `DJANGO_LOG_LEVEL=INFO`
+- optional `DATA_PROCESSING_LOG_LEVEL=INFO`
 - tuned CSV/staging cache environment variables if needed for larger demos
 
-Render automatically injects `PORT`, `RENDER_EXTERNAL_HOSTNAME`, and `RENDER_EXTERNAL_URL`, and the app folds those into Django’s trusted runtime configuration.
+Render automatically injects `PORT`, `RENDER_EXTERNAL_HOSTNAME`, and `RENDER_EXTERNAL_URL`, and the app folds those into Django's trusted runtime configuration.
 
 ## Notes and limitations
 
